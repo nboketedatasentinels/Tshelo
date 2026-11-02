@@ -1,0 +1,117 @@
+name: Verify
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            admin/package-lock.json
+      - run: npm ci
+      - name: Install website dependencies for cross-platform API and Files tests
+        run: npm ci --prefix admin
+      - run: npm run verify
+      - name: Enforce Android export size budgets
+        env:
+          EXPO_PUBLIC_SUPABASE_URL: https://bundle-check.invalid
+          EXPO_PUBLIC_SUPABASE_ANON_KEY: bundle-check-public-key
+          EXPO_PUBLIC_API_BASE_URL: https://api-bundle-check.invalid
+        run: npm run bundle:size
+      - name: Reject high-severity website runtime advisories
+        run: npm audit --prefix admin --omit=dev --audit-level=high
+      - name: Reject high-severity dependency advisories
+        run: npm audit --audit-level=high
+      - name: Reject high-severity website runtime advisories
+        run: npm audit --prefix admin --omit=dev --audit-level=high
+
+  permission-database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb
+        with:
+          version: 2.113.0
+      - name: Verify checked-in Supabase configuration
+        run: test -f supabase/config.toml
+      - name: Start migrated disposable database
+        run: supabase start
+      - name: Run granular admin permission matrix
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql
+          --host 127.0.0.1
+          --port 54322
+          --username postgres
+          --dbname postgres
+          --set ON_ERROR_STOP=1
+          --file supabase/tests/fund_admin_permission_matrix.sql
+      - name: Verify API v1 database boundaries
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql
+          --host 127.0.0.1
+          --port 54322
+          --username postgres
+          --dbname postgres
+          --set ON_ERROR_STOP=1
+          --file supabase/tests/api_v1_boundaries.sql
+      - name: Verify future table access and RLS
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/future_table_security.sql
+      - name: Verify legacy table least-privilege grants
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/legacy_table_privileges.sql
+      - name: Verify payment encryption and role boundaries
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/payment_identifier_encryption.sql
+      - name: Verify explicit consent audit and withdrawal
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/consent_audit.sql
+      - name: Verify receipt model logs and owner review completion
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/receipt_scan_audit.sql
+      - name: Verify joined-only vouch reads
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/vouch_membership.sql
+      - name: Verify cleanup failure monitoring
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql --host 127.0.0.1 --port 54322 --username postgres --dbname postgres
+          --set ON_ERROR_STOP=1 --file supabase/tests/waitlist_cleanup_monitor.sql
+      - name: Stop disposable database
+        if: always()
+        run: supabase stop --no-backup

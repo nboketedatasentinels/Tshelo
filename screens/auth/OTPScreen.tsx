@@ -1,0 +1,410 @@
+import { useState, useRef, useEffect } from 'react'
+import {
+  View, Text, StyleSheet, TouchableOpacity, StatusBar, TextInput, KeyboardAvoidingView, Platform, ActivityIndicator, Alert } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+import Ionicons from '@expo/vector-icons/Ionicons'
+import { NativeStackNavigationProp } from '@react-navigation/native-stack'
+import { RouteProp } from '@react-navigation/native'
+import { AuthStackParamList } from '../../navigation/types'
+import { colors } from '../../theme/colors'
+import { fonts } from '../../theme/typography'
+import { supabase } from '../../lib/supabase'
+import { api } from '../../lib/api'
+import { toApiUiError } from '../../lib/apiScreen'
+import { useAuth } from '../../context/AuthContext'
+import { useTheme } from '../../context/ThemeContext'
+import { useRequireOnline } from '../../context/ConnectivityContext'
+import { hapticSuccess, hapticError } from '../../lib/haptics'
+import { detectProviderOrUnknown as detectProvider } from '../../lib/providers'
+import { maskedInternationalPhone } from '../../lib/phoneNumbers'
+import { useTabletLayout } from '../../lib/useTabletLayout'
+
+type Props = {
+  navigation: NativeStackNavigationProp<AuthStackParamList, 'OTP'>
+  route: RouteProp<AuthStackParamList, 'OTP'>
+}
+
+const OTP_LENGTH = 6
+const RESEND_COUNTDOWN = 60
+
+function verificationMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : ''
+  const normalized = message.toLowerCase()
+
+  if (normalized.includes('expired') || normalized.includes('invalid')) {
+    return 'This code has expired or is no longer valid. Request a new code and try again.'
+  }
+  if (normalized.includes('rate limit') || normalized.includes('too many')) {
+    return 'Too many attempts were made. Wait a moment, then request a new code.'
+  }
+  return message || 'We could not verify that code. Check your connection and try again.'
+}
+
+export default function OTPScreen({ navigation, route }: Props) {
+  const { phone, email, mode, registration, mobileMoneyReturn } = route.params
+  const { isTablet } = useTabletLayout()
+  const { refreshProfile } = useAuth()
+  const requireOnline = useRequireOnline()
+  const [digits, setDigits] = useState<string[]>(Array(OTP_LENGTH).fill(''))
+  const [countdown, setCountdown] = useState(RESEND_COUNTDOWN)
+  const [loading, setLoading] = useState(false)
+  const inputRefs = useRef<Array<TextInput | null>>([])
+
+  const otp = digits.join('')
+  const isComplete = otp.length === OTP_LENGTH && digits.every(d => d !== '')
+
+  useEffect(() => {
+    if (countdown === 0) return
+    const t = setInterval(() => setCountdown(c => c - 1), 1000)
+    return () => clearInterval(t)
+  }, [countdown])
+
+  function handleDigit(value: string, index: number) {
+    const incomingDigits = value.replace(/\D/g, '').slice(0, OTP_LENGTH - index)
+    const next = [...digits]
+    if (!incomingDigits) {
+      next[index] = ''
+      setDigits(next)
+      return
+    }
+
+    incomingDigits.split('').forEach((digit, offset) => {
+      next[index + offset] = digit
+    })
+    setDigits(next)
+    const nextIndex = index + incomingDigits.length
+    if (nextIndex < OTP_LENGTH) inputRefs.current[nextIndex]?.focus()
+  }
+
+  function handleKeyPress(key: string, index: number) {
+    if (key === 'Backspace' && !digits[index] && index > 0) {
+      const next = [...digits]
+      next[index - 1] = ''
+      setDigits(next)
+      inputRefs.current[index - 1]?.focus()
+    }
+  }
+
+  async function handleResend() {
+    if (mode === 'mobile_money') {
+      Alert.alert('Verification unavailable', 'Additional mobile-money verification is not available yet.')
+      return
+    }
+
+    if (!requireOnline()) return
+    try {
+      const { error } = await supabase.auth.signInWithOtp(email
+        ? { email, options: { shouldCreateUser: false } }
+        : { phone, options: { shouldCreateUser: mode === 'register' } })
+      if (error) { Alert.alert('Could not send code', verificationMessage(error)); return }
+    } catch (error) {
+      Alert.alert('Could not send code', verificationMessage(error))
+      return
+    }
+    setCountdown(RESEND_COUNTDOWN)
+    setDigits(Array(OTP_LENGTH).fill(''))
+    inputRefs.current[0]?.focus()
+  }
+
+  async function handleVerify() {
+    if (!isComplete) return
+    setLoading(true)
+
+    if (mode === 'mobile_money' && mobileMoneyReturn) {
+      setLoading(false)
+      Alert.alert('Verification unavailable', 'No number was added because it could not be securely verified.')
+      navigation.goBack()
+      return
+    }
+
+    if (!requireOnline()) { setLoading(false); return }
+    let data: Awaited<ReturnType<typeof supabase.auth.verifyOtp>>['data']
+    let error: Awaited<ReturnType<typeof supabase.auth.verifyOtp>>['error']
+    try {
+      ({ data, error } = await supabase.auth.verifyOtp(email
+        ? { email, token: otp, type: 'email' }
+        : { phone, token: otp, type: 'sms' }))
+    } catch (verifyError) {
+      setLoading(false)
+      hapticError()
+      Alert.alert('Could not verify code', verificationMessage(verifyError))
+      return
+    }
+
+    if (error) {
+      setLoading(false)
+      hapticError()
+      Alert.alert('Could not verify code', verificationMessage(error))
+      return
+    }
+
+    hapticSuccess()
+    const userId = data.user?.id
+    if (!userId) {
+      setLoading(false)
+      hapticError()
+      Alert.alert('Could not verify code', 'No verified account was returned. Request a new code and try again.')
+      return
+    }
+
+    if (registration) {
+      try {
+        await api.users.updateMe({
+          name: registration.name,
+          country_code: registration.countryCode,
+          preferred_currency: registration.currency,
+          terms_version: '1.0',
+          privacy_version: '1.0',
+          data_processing_consent: true,
+        })
+      } catch (profileError) {
+        Alert.alert('Registration error', toApiUiError(profileError).message)
+        setLoading(false)
+        return
+      }
+      setLoading(false)
+      navigation.navigate('BankDetails', {
+        name: registration.name,
+        registeredPhone: phone,
+        mobileMoneyNumbers: [{
+          id: 'registered',
+          phone,
+          provider: detectProvider(phone),
+        }],
+      })
+      return
+    }
+
+    let profile
+    try {
+      profile = await api.users.me()
+    } catch (profileError) {
+      Alert.alert('Could not load profile', toApiUiError(profileError).message)
+      setLoading(false)
+      return
+    }
+
+    setLoading(false)
+
+    if (!profile.profile_completed) {
+      navigation.navigate('ProfileSetup')
+      return
+    }
+
+    // Make the navigator react immediately after a successful login instead
+    // of relying solely on the auth event timing.
+    await refreshProfile()
+  }
+
+  const { isDark } = useTheme()
+  const bg       = isDark ? '#1A1C24' : '#F4F2EB'
+  const inputBg  = isDark ? '#2D2E41' : '#FFFFFF'
+  const textCol  = isDark ? '#F2F2F7' : colors.textPrimary
+  const mutedCol = isDark ? '#8A8A9A' : colors.textMuted
+  const borderCol = isDark ? '#3A3A5C' : colors.border
+
+  const maskedPhone = maskedInternationalPhone(phone)
+  const timer = `${String(Math.floor(countdown / 60)).padStart(2, '0')}:${String(countdown % 60).padStart(2, '0')}`
+
+  return (
+    <SafeAreaView style={[styles.safe, { backgroundColor: bg }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={bg} />
+
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <View style={[styles.container, isTablet && styles.containerTablet]}>
+          <TouchableOpacity style={[styles.backButton, { backgroundColor: inputBg, borderColor: borderCol }]} onPress={() => navigation.goBack()}>
+            <Ionicons name="arrow-back" size={20} color={textCol} />
+          </TouchableOpacity>
+
+          <View style={styles.header}>
+            <Text style={styles.heading}>
+              {mode === 'mobile_money' ? 'Verify mobile money' : email ? 'Verify your email' : 'Verify your number'}
+            </Text>
+            <Text style={[styles.subheading, { color: mutedCol }]}>
+              Enter the 6-digit code sent to{'\n'}
+              <Text style={[styles.phoneHighlight, { color: textCol }]}>{email ?? maskedPhone}</Text>
+            </Text>
+          </View>
+
+          {/* OTP boxes */}
+          <View style={[styles.otpRow, isTablet && styles.otpRowTablet]}>
+            {digits.map((digit, i) => (
+              <TextInput
+                key={i}
+                ref={ref => { inputRefs.current[i] = ref }}
+                style={[styles.otpBox, { backgroundColor: inputBg, color: textCol }]}
+                value={digit}
+                onChangeText={v => handleDigit(v, i)}
+                onKeyPress={({ nativeEvent }) => handleKeyPress(nativeEvent.key, i)}
+                keyboardType="number-pad"
+                maxLength={i === 0 ? OTP_LENGTH : 1}
+                textContentType="oneTimeCode"
+                autoComplete={email ? 'one-time-code' : 'sms-otp'}
+                selectTextOnFocus
+                autoFocus={i === 0}
+                accessibilityLabel={`Verification digit ${i + 1} of ${OTP_LENGTH}`}
+              />
+            ))}
+          </View>
+
+          {/* Resend */}
+          <View style={styles.resendRow}>
+            {countdown > 0 ? (
+              <Text style={[styles.resendCountdown, { color: mutedCol }]}>
+                Resend in <Text style={[styles.resendTimer, { color: textCol }]}>{timer}</Text>
+              </Text>
+            ) : (
+              <TouchableOpacity onPress={handleResend}>
+                <Text style={styles.resendLink}>Resend code</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+
+          <TouchableOpacity
+            style={[styles.primaryButton, isComplete && styles.buttonActive]}
+            onPress={handleVerify}
+            activeOpacity={isComplete ? 0.85 : 1}
+            disabled={loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#fff" />
+              : <Text style={[styles.primaryButtonText, isComplete && styles.primaryButtonTextActive]}>Verify</Text>
+            }
+          </TouchableOpacity>
+
+          {mode !== 'mobile_money' && (
+            <View style={styles.footer}>
+              <Text style={[styles.footerText, { color: textCol }]}>
+                {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
+              </Text>
+              <TouchableOpacity onPress={() => navigation.replace(mode === 'login' ? 'Register' : 'Login')}>
+                <Text style={styles.footerLink}>{mode === 'login' ? 'Create One' : 'Log in'}</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  )
+}
+
+const styles = StyleSheet.create({
+  safe:  { flex: 1 },
+  flex:  { flex: 1 },
+  container: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 40,
+  },
+  containerTablet: {
+    width: '100%',
+    maxWidth: 560,
+    alignSelf: 'center',
+    paddingHorizontal: 0,
+    paddingTop: 40,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: colors.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 36,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  header: { marginBottom: 40 },
+  heading: {
+    fontSize: 30,
+    fontFamily: fonts.display.bold,
+    color: '#9D86FF',
+    marginBottom: 10,
+  },
+  subheading: {
+    fontSize: 15,
+    color: '#4A4A4A',
+    lineHeight: 22,
+  },
+  phoneHighlight: {
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+
+  otpRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 28,
+  },
+  otpRowTablet: {
+    justifyContent: 'center',
+    gap: 12,
+  },
+  otpBox: {
+    width: 48,
+    height: 58,
+    borderRadius: 14,
+    textAlign: 'center',
+    fontSize: 22,
+    fontWeight: '700',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 6,
+    elevation: 2,
+  },
+
+  resendRow: {
+    alignItems: 'center',
+    marginBottom: 36,
+  },
+  resendCountdown: {
+    fontSize: 13,
+    color: '#4A4A4A',
+  },
+  resendTimer: {
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  resendLink: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#7439E0',
+  },
+
+  primaryButton: {
+    backgroundColor: '#D4D4D8',
+    borderRadius: 28,
+    paddingVertical: 17,
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  buttonActive: {
+    backgroundColor: colors.primary,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  primaryButtonText: {
+    color: '#676767',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  primaryButtonTextActive: {
+    color: '#FFFFFF',
+  },
+
+  footer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+  },
+  footerText: { fontSize: 14, color: colors.textSecondary },
+  footerLink: { fontSize: 14, fontWeight: '700', color: '#7439E0' },
+})

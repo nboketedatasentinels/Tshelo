@@ -1,0 +1,162 @@
+import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import test from 'node:test'
+import { PGlite } from '@electric-sql/pglite'
+
+test('Phase 2 membership, future-table defaults and waitlist controls', async () => {
+  const db = new PGlite()
+  const ids = Array.from({length:8},(_,i)=>`00000000-0000-4000-8000-${String(i+1).padStart(12,'0')}`)
+  const [owner, member, pending, former, outsider, org, group, otherGroup] = ids
+  const baseline = await readFile(new URL('../../supabase/migrations/20260707053236_baseline.sql',import.meta.url),'utf8')
+  const tables=['organizations','organization_members','organization_payouts','recurring_groups','recurring_group_members','recurring_rounds','countries','country_waitlist']
+  const asClient = async id => {
+    await db.exec('RESET ROLE')
+    await db.query("SELECT set_config('request.jwt.claim.sub',$1,false),set_config('request.jwt.claim.role','authenticated',false)",[id])
+    await db.exec('SET ROLE authenticated')
+  }
+  const asServer = async () => {
+    await db.exec('RESET ROLE')
+    await db.exec("SELECT set_config('request.jwt.claim.role','service_role',false); SET ROLE service_role")
+  }
+  try {
+    await db.exec(`CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role BYPASSRLS; CREATE ROLE supabase_admin;
+      CREATE SCHEMA auth;
+      CREATE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS 'SELECT nullif(current_setting(''request.jwt.claim.sub'',true),'''')::uuid';
+      CREATE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS 'SELECT current_setting(''request.jwt.claim.role'',true)';
+      GRANT USAGE ON SCHEMA public,auth TO anon,authenticated,service_role;
+      CREATE TYPE member_status AS ENUM ('pending','joined','declined','removed','left');
+      CREATE TYPE payment_method AS ENUM ('cash');`)
+    for(const table of tables) {
+      const definition=baseline.match(new RegExp(`CREATE TABLE public\\.${table} \\([\\s\\S]*?\\n\\);`))?.[0]
+      assert.ok(definition)
+      await db.exec(definition.replaceAll('uuid_generate_v4()','gen_random_uuid()'))
+      await db.exec(`ALTER TABLE ${table} ENABLE ROW LEVEL SECURITY; GRANT ALL ON ${table} TO anon,authenticated,service_role`)
+    }
+    for(const table of tables) for(const policy of baseline.match(/CREATE POLICY [\s\S]*?;/g).filter(p=>p.includes(` ON public.${table} `))) await db.exec(policy)
+    await db.exec('ALTER TABLE country_waitlist ADD PRIMARY KEY(id)')
+    await db.query("INSERT INTO organizations(id,name,type) VALUES ($1,'Org','partner')",[org])
+    for(const [id,role,active] of [[owner,'owner',true],[member,'member',true],[pending,'pending',false],[former,'member',false]]) {
+      await db.query('INSERT INTO organization_members(organization_id,user_id,role,is_active) VALUES ($1,$2,$3,$4)',[org,id,role,active])
+    }
+    await db.query("INSERT INTO organization_payouts(organization_id,period_start,period_end,gross_amount,commission_rate,commission_amount) VALUES ($1,current_date,current_date,1,0,0)",[org])
+    for(const [g,o] of [[group,owner],[otherGroup,outsider]]) await db.query("INSERT INTO recurring_groups(id,owner_id,group_code,name,contribution_amount,currency_code,frequency,payout_order) VALUES ($1,$2,'CODE','Group',1,'BWP','monthly','fixed')",[g,o])
+    for(const [id,status] of [[member,'joined'],[pending,'pending'],[former,'left']]) await db.query('INSERT INTO recurring_group_members(group_id,user_id,status) VALUES ($1,$2,$3)',[group,id,status])
+    await db.query('INSERT INTO recurring_rounds(group_id,round_number,due_date) VALUES ($1,1,current_date)',[group])
+    await db.exec(`INSERT INTO countries(code,name,currency_code,currency_name,currency_symbol,phone_prefix,phone_length,is_launch_country)
+      VALUES ('KEN','Kenya','KES','Shilling','KSh','+254',9,false),('BWA','Botswana','BWP','Pula','P','+267',8,true)`)
+    await db.exec(await readFile(new URL('../../supabase/migrations/20261012140000_nonrecursive_membership_policies.sql',import.meta.url),'utf8'))
+    for(const id of [owner,member,pending,former,outsider]) {
+      await asClient(id)
+      const canRead=[owner,member].includes(id)
+      for(const table of ['organizations','organization_members','organization_payouts']) assert.equal((await db.query(`SELECT * FROM ${table}`)).rows.length>0,canRead)
+      assert.equal((await db.query('SELECT * FROM recurring_groups WHERE id=$1',[group])).rows.length,canRead?1:0)
+      assert.equal((await db.query('SELECT * FROM recurring_group_members WHERE group_id=$1',[group])).rows.length>0,canRead)
+      assert.equal((await db.query('SELECT * FROM recurring_rounds WHERE group_id=$1',[group])).rows.length>0,canRead)
+      if(id!==owner) await assert.rejects(db.query('INSERT INTO recurring_group_members(group_id,user_id) VALUES ($1,$2)',[group,outsider]),/row-level security/)
+    }
+    await asClient(owner)
+    await db.query('INSERT INTO recurring_group_members(group_id,user_id) VALUES ($1,$2)',[group,outsider])
+    await assert.rejects(db.query('INSERT INTO recurring_group_members(group_id,user_id) VALUES ($1,$2)',[otherGroup,owner]),/row-level security/)
+    await db.exec('RESET ROLE; SET ROLE anon')
+    assert.equal((await db.query('SELECT * FROM organizations')).rows.length,0)
+    assert.equal((await db.query('SELECT * FROM recurring_groups')).rows.length,0)
+    await assert.rejects(db.query('SELECT is_recurring_group_member($1)',[group]),/permission denied/)
+    await db.exec('RESET ROLE')
+    await db.query('UPDATE organization_members SET is_active=false WHERE user_id=$1',[member])
+    await db.query("UPDATE recurring_group_members SET status='removed' WHERE user_id=$1",[member])
+    await asClient(member)
+    assert.equal((await db.query('SELECT * FROM organizations')).rows.length,0)
+    assert.equal((await db.query('SELECT * FROM recurring_groups WHERE id=$1',[group])).rows.length,0)
+    await db.exec(`RESET ROLE; ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO anon,authenticated;
+      ALTER DEFAULT PRIVILEGES FOR ROLE postgres GRANT SELECT ON TABLES TO anon;`)
+    await db.exec(await readFile(new URL('../../supabase/migrations/20261012150000_restrict_future_table_defaults.sql',import.meta.url),'utf8'))
+    await db.exec('CREATE TABLE public.security_probe(id int)')
+    assert.equal((await db.query("SELECT has_table_privilege('anon','security_probe','SELECT') AS allowed")).rows[0].allowed,false)
+    await assert.rejects(db.query('SELECT assert_application_table_security()'),/RLS missing/)
+    await db.exec('ALTER TABLE security_probe ENABLE ROW LEVEL SECURITY; GRANT SELECT ON security_probe TO authenticated')
+    await assert.rejects(db.query('SELECT assert_application_table_security()'),/Grant without matching/)
+    await db.exec('CREATE POLICY probe_read ON security_probe FOR SELECT TO authenticated USING (false)')
+    await db.query('SELECT assert_application_table_security()')
+    await db.exec('GRANT TRUNCATE ON security_probe TO anon')
+    await assert.rejects(db.query('SELECT assert_application_table_security()'),/Unexpected structural/)
+    await db.exec('DROP TABLE security_probe')
+    await db.exec(await readFile(new URL('../../supabase/migrations/20261012160000_country_waitlist_submission_controls.sql',import.meta.url),'utf8'))
+    for(const role of ['anon','authenticated']) {
+      await db.exec(`SET ROLE ${role}`)
+      await assert.rejects(db.query('INSERT INTO country_waitlist(country_code,email) VALUES (\'KEN\',\'a@example.test\')'),/permission denied/)
+      await assert.rejects(db.query('SELECT * FROM country_waitlist'),/permission denied/)
+      await assert.rejects(db.query("SELECT submit_country_waitlist('KEN','a@example.test',NULL)"),/permission denied/)
+      await db.exec('RESET ROLE')
+    }
+    await asServer()
+    for(const args of [['BAD','a@example.test',null],['BWA','a@example.test',null],['KEN','bad',null],['KEN',null,'+26771234567'],['KEN',null,null]]) {
+      await assert.rejects(db.query('SELECT submit_country_waitlist($1,$2,$3)',args),/WAITLIST_INVALID/)
+    }
+    await db.query("SELECT submit_country_waitlist('ken',' Test@Example.test ', '+254712345678')")
+    await db.query("SELECT submit_country_waitlist('KEN','test@example.test',NULL)")
+    assert.equal((await db.query('SELECT * FROM country_waitlist')).rows.length,1)
+    assert.equal((await db.query('SELECT email FROM country_waitlist')).rows[0].email,'test@example.test')
+    for(let i=0;i<4;i++) assert.equal((await db.query('SELECT consume_country_waitlist_limits($1,$2) AS allowed',['a'.repeat(64),['b'.repeat(64)]])).rows[0].allowed,i<3)
+    for(let i=0;i<11;i++) assert.equal((await db.query('SELECT consume_country_waitlist_limits($1,$2) AS allowed',['c'.repeat(64),[(i+1).toString(16).padStart(64,'0')]])).rows[0].allowed,i<10)
+    await db.query("UPDATE country_waitlist SET expires_at=now()-interval '1 day'")
+    await db.query('SELECT purge_expired_country_waitlist()')
+    assert.equal((await db.query('SELECT * FROM country_waitlist')).rows.length,0)
+    await db.exec("UPDATE country_waitlist_rate_limits SET expires_at=now()-interval '1 day'")
+    assert.equal((await db.query('SELECT consume_country_waitlist_limits($1,$2) AS allowed',['a'.repeat(64),['b'.repeat(64)]])).rows[0].allowed,true)
+    await db.exec('RESET ROLE')
+    // PGlite does not provide pg_cron. Test the real retention SQL here;
+    // scheduling is verified against the hosted extension after deployment.
+    const retention = await readFile(new URL('../../supabase/migrations/20261012170000_waitlist_retention_and_cleanup.sql',import.meta.url),'utf8')
+    await db.exec(retention.split('-- Read-only inspection')[0])
+    await asServer()
+    for(const email of ['fresh@example.test','notified@example.test','signedup@example.test','expired@example.test']) {
+      await db.query("SELECT submit_country_waitlist('KEN',$1,NULL)",[email])
+    }
+    assert.equal((await db.query("SELECT bool_and(expires_at=created_at+interval '12 months') AS correct FROM country_waitlist")).rows[0].correct,true)
+    await db.exec("UPDATE country_waitlist SET notified=true WHERE email='notified@example.test'; UPDATE country_waitlist SET signed_up=true WHERE email='signedup@example.test'; UPDATE country_waitlist SET expires_at=now()-interval '1 second' WHERE email='expired@example.test'")
+    await db.query('SELECT purge_expired_country_waitlist()')
+    assert.deepEqual((await db.query('SELECT email FROM country_waitlist')).rows,[{email:'fresh@example.test'}])
+  } finally { await db.close() }
+})
+
+test('postgres future-object defaults close client access without changing existing ACLs or managed defaults', async () => {
+  const db = new PGlite()
+  try {
+    await db.exec(`CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role; CREATE ROLE supabase_admin;
+      CREATE SCHEMA other;
+      CREATE TABLE public.existing_acl_probe(id int);
+      CREATE SEQUENCE public.existing_seq_probe;
+      CREATE FUNCTION public.existing_fn_probe() RETURNS int LANGUAGE sql AS 'SELECT 1';
+      GRANT SELECT ON public.existing_acl_probe TO anon;
+      GRANT USAGE ON SEQUENCE public.existing_seq_probe TO authenticated;`)
+    for (const owner of ['postgres','supabase_admin']) for (const kind of ['TABLES','SEQUENCES','FUNCTIONS']) {
+      await db.exec(`ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} GRANT ALL ON ${kind} TO anon,authenticated;
+        ALTER DEFAULT PRIVILEGES FOR ROLE ${owner} IN SCHEMA public GRANT ALL ON ${kind} TO anon,authenticated,service_role;`)
+    }
+    const snapshot = async () => (await db.query(`SELECT 'relation' kind,relname name,relacl::text acl FROM pg_class WHERE relname IN ('existing_acl_probe','existing_seq_probe')
+      UNION ALL SELECT 'function',proname,proacl::text FROM pg_proc WHERE proname='existing_fn_probe'
+      UNION ALL SELECT 'managed',defaclnamespace::text||defaclobjtype::text,defaclacl::text FROM pg_default_acl WHERE defaclrole='supabase_admin'::regrole ORDER BY 1,2`)).rows
+    const before = await snapshot()
+    const migration = await readFile(new URL('../../supabase/migrations/20261023160000_close_postgres_future_object_defaults.sql',import.meta.url),'utf8')
+    await db.exec(migration)
+    await db.exec(migration)
+    assert.deepEqual(await snapshot(),before)
+    await db.exec(`CREATE TABLE public.future_acl_probe(id int);
+      CREATE SEQUENCE public.future_seq_probe;
+      CREATE FUNCTION public.future_fn_probe() RETURNS int LANGUAGE sql AS 'SELECT 1';
+      CREATE FUNCTION other.future_fn_probe() RETURNS int LANGUAGE sql AS 'SELECT 1';`)
+    for (const role of ['anon','authenticated']) {
+      const row=(await db.query(`SELECT has_table_privilege($1,'public.future_acl_probe','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') t,
+        has_sequence_privilege($1,'public.future_seq_probe','USAGE,SELECT,UPDATE') s,
+        has_function_privilege($1,'public.future_fn_probe()','EXECUTE') f,
+        has_function_privilege($1,'other.future_fn_probe()','EXECUTE') other_f`,[role])).rows[0]
+      assert.deepEqual(row,{t:false,s:false,f:false,other_f:false})
+    }
+    const service=(await db.query(`SELECT has_table_privilege('service_role','public.future_acl_probe','SELECT') t,
+      has_sequence_privilege('service_role','public.future_seq_probe','USAGE') s,
+      has_function_privilege('service_role','public.future_fn_probe()','EXECUTE') f`)).rows[0]
+    assert.deepEqual(service,{t:true,s:true,f:true})
+    await db.exec('GRANT SELECT ON public.future_acl_probe TO authenticated; GRANT EXECUTE ON FUNCTION public.future_fn_probe() TO authenticated')
+    assert.equal((await db.query(`SELECT has_table_privilege('authenticated','public.future_acl_probe','SELECT') AND has_function_privilege('authenticated','public.future_fn_probe()','EXECUTE') allowed`)).rows[0].allowed,true)
+  } finally { await db.close() }
+})

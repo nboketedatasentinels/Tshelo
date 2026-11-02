@@ -1,0 +1,433 @@
+import {
+  createSupabaseTokenProvider,
+  createTsheloApiClient,
+  TsheloApiError,
+  TsheloApiProtocolError,
+} from '..'
+
+function response(
+  status: number,
+  body: unknown,
+  requestId = 'request-123',
+): Response {
+  const headers = new Map<string, string>([
+    ['content-type', 'application/json'],
+    ['x-request-id', requestId],
+  ])
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
+    text: async () => JSON.stringify(body),
+  } as Response
+}
+
+function success<T>(data: T, requestId = 'request-123') {
+  return response(200, { ok: true, data, request_id: requestId }, requestId)
+}
+
+function failure(status: number, code: string, requestId = 'request-123') {
+  return response(status, {
+    ok: false,
+    error: { code, message: `Safe ${code} message.`, retryable: false },
+    request_id: requestId,
+  }, requestId)
+}
+
+describe('shared Tshelo API client', () => {
+  it('loads and submits the authenticated account closure request', async () => {
+    const fetchMock = jest.fn(async () => success({}))
+    const client = createTsheloApiClient({ baseUrl: 'https://api.example', getAccessToken: async () => 'token', fetch: fetchMock as typeof fetch })
+
+    await client.users.getAccountClosureRequest()
+    await client.users.requestAccountClosure()
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>
+    expect(calls.map(([url, options]) => [url, options.method, options.body])).toEqual([
+      ['https://api.example/api/v1/users/me/closure-request', 'GET', undefined],
+      ['https://api.example/api/v1/users/me/closure-request', 'POST', undefined],
+    ])
+  })
+
+  it('submits a structured authenticated support report', async () => {
+    const fetchMock = jest.fn(async () => success({}))
+    const client = createTsheloApiClient({ baseUrl: 'https://api.example', getAccessToken: async () => 'token', fetch: fetchMock as typeof fetch })
+
+    await client.users.submitSupportReport({
+      category: 'technical',
+      description: 'The app closed after I opened a report.',
+      platform: 'android',
+    })
+
+    const [url, options] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('https://api.example/api/v1/users/me/support-reports')
+    expect(options.method).toBe('POST')
+    expect(JSON.parse(options.body as string)).toEqual({
+      category: 'technical',
+      description: 'The app closed after I opened a report.',
+      platform: 'android',
+    })
+  })
+
+  it('serializes the event file upload, finalise, access, and removal operations', async () => {
+    const fetchMock = jest.fn(async () => success({}))
+    const client = createTsheloApiClient({ baseUrl: 'https://api.example', getAccessToken: async () => 'token', fetch: fetchMock as typeof fetch })
+    const eventId = '11111111-1111-4111-8111-111111111111'
+    const fileId = '22222222-2222-4222-8222-222222222222'
+    const metadata = { file_name: 'Plan.pdf', content_type: 'application/pdf' as const, size_bytes: 100 }
+    await client.events.createFileUploadSession(eventId, metadata)
+    await client.events.finalizeFile(eventId, { upload_id: fileId })
+    await client.events.createFileAccess(eventId, fileId)
+    await client.events.removeFile(eventId, fileId)
+    await client.events.updateBanner(eventId, { file_id: fileId, focal_x: 0.25, focal_y: 0.7 })
+    await client.events.updateBanner(eventId, { file_id: null })
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>
+    expect(calls.map(([url, options]) => [url, options.method, options.body ? JSON.parse(options.body as string) : undefined])).toEqual([
+      [`https://api.example/api/v1/events/${eventId}/files/upload-session`, 'POST', metadata],
+      [`https://api.example/api/v1/events/${eventId}/files/finalize`, 'POST', { upload_id: fileId }],
+      [`https://api.example/api/v1/events/${eventId}/files/${fileId}/access`, 'POST', undefined],
+      [`https://api.example/api/v1/events/${eventId}/files/${fileId}`, 'DELETE', undefined],
+      [`https://api.example/api/v1/events/${eventId}/banner`, 'PATCH', { file_id: fileId, focal_x: 0.25, focal_y: 0.7 }],
+      [`https://api.example/api/v1/events/${eventId}/banner`, 'PATCH', { file_id: null }],
+    ])
+  })
+
+  it('serializes idempotent announcement pin changes', async () => {
+    const fetchMock = jest.fn(async () => success({}))
+    const client = createTsheloApiClient({ baseUrl: 'https://api.example', getAccessToken: async () => 'token', fetch: fetchMock as typeof fetch })
+    const eventId = '11111111-1111-4111-8111-111111111111'
+    const announcementId = '22222222-2222-4222-8222-222222222222'
+    await client.events.setAnnouncementPin(eventId, announcementId, { is_pinned: true })
+    await client.events.setAnnouncementPin(eventId, announcementId, { is_pinned: false })
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>
+    expect(calls.map(([url, options]) => [url, options.method, JSON.parse(options.body as string)])).toEqual([
+      [`https://api.example/api/v1/events/${eventId}/announcements/${announcementId}/pin`, 'PUT', { is_pinned: true }],
+      [`https://api.example/api/v1/events/${eventId}/announcements/${announcementId}/pin`, 'PUT', { is_pinned: false }],
+    ])
+  })
+
+  it('serializes typed filters and sends the current Supabase access token', async () => {
+    let seenUrl = ''
+    let seenOptions: RequestInit | undefined
+    const fetchMock = jest.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      seenUrl = String(input)
+      seenOptions = options
+      return success({
+        items: [],
+        page: { limit: 10, next_cursor: null, has_more: false },
+      })
+    })
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example/',
+      getAccessToken: async () => 'current-access-token',
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await client.funds.list({
+      limit: 10,
+      status: ['active', 'closed'],
+      member_user_id: '11111111-1111-4111-8111-111111111111',
+    })
+
+    const parsed = new URL(seenUrl)
+    expect(parsed.origin).toBe('https://api.tshelo.example')
+    expect(parsed.pathname).toBe('/api/v1/funds')
+    expect(parsed.searchParams.get('limit')).toBe('10')
+    expect(parsed.searchParams.getAll('status')).toEqual(['active', 'closed'])
+    expect(parsed.searchParams.get('member_user_id')).toBe('11111111-1111-4111-8111-111111111111')
+    expect((seenOptions?.headers as Record<string, string>).Authorization).toBe('Bearer current-access-token')
+  })
+
+  it('refreshes once after a 401 and retries with the new token', async () => {
+    const seenAuthorizations: string[] = []
+    const fetchMock = jest.fn(async (_input: RequestInfo | URL, options?: RequestInit) => {
+      seenAuthorizations.push((options?.headers as Record<string, string>).Authorization)
+      return seenAuthorizations.length === 1
+        ? failure(401, 'UNAUTHENTICATED')
+        : success({ items: [], page: { limit: 25, next_cursor: null, has_more: false } })
+    })
+    const refreshAccessToken = jest.fn(async () => 'refreshed-access-token')
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'expired-access-token',
+      refreshAccessToken,
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await expect(client.events.list()).resolves.toMatchObject({ items: [] })
+    expect(refreshAccessToken).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(seenAuthorizations).toEqual([
+      'Bearer expired-access-token',
+      'Bearer refreshed-access-token',
+    ])
+  })
+
+  it('does not loop when refresh cannot produce a session', async () => {
+    const fetchMock = jest.fn(async () => failure(401, 'UNAUTHENTICATED'))
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'expired-access-token',
+      refreshAccessToken: async () => null,
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await expect(client.contributions.list()).rejects.toMatchObject({
+      name: 'TsheloApiError',
+      code: 'UNAUTHENTICATED',
+      status: 401,
+      requestId: 'request-123',
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('throws typed API errors with field and retry metadata intact', async () => {
+    const apiFailure = response(422, {
+      ok: false,
+      error: {
+        code: 'VALIDATION_FAILED',
+        message: 'One or more request fields are invalid.',
+        retryable: false,
+        field_errors: [{ field: 'title', code: 'too_short', message: 'Title is too short.' }],
+      },
+      request_id: 'validation-request',
+    }, 'validation-request')
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: jest.fn(async () => apiFailure) as unknown as typeof fetch,
+    })
+
+    const promise = client.funds.create({
+      title: 'x',
+      fund_type: 'other',
+      currency_code: 'BWP',
+    })
+    await expect(promise).rejects.toBeInstanceOf(TsheloApiError)
+    await expect(promise).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED',
+      retryable: false,
+      apiError: {
+        field_errors: [{ field: 'title', code: 'too_short' }],
+      },
+    })
+  })
+
+  it('rejects malformed envelopes and mismatched request IDs', async () => {
+    const malformedClient = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: jest.fn(async () => response(200, { data: {} })) as unknown as typeof fetch,
+    })
+    await expect(malformedClient.users.get('user-id')).rejects.toBeInstanceOf(TsheloApiProtocolError)
+
+    const mismatchClient = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: jest.fn(async () => response(200, {
+        ok: true,
+        data: {},
+        request_id: 'body-id',
+      }, 'header-id')) as unknown as typeof fetch,
+    })
+    await expect(mismatchClient.users.get('user-id')).rejects.toThrow('mismatched request identifiers')
+  })
+
+  it('uses exact mutation methods and JSON bodies', async () => {
+    const fetchMock = jest.fn(async () => success({ id: 'event-id' }))
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await client.events.create({
+      name: 'Client integration event',
+      event_type: 'other',
+      event_date: '2026-10-01',
+      currency_code: 'BWP',
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.tshelo.example/api/v1/events',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: 'Client integration event',
+          event_type: 'other',
+          event_date: '2026-10-01',
+          currency_code: 'BWP',
+        }),
+      }),
+    )
+  })
+
+  it('uses the guest directory, RSVP, and capacity routes', async () => {
+    const calls: Array<{ url: string; options?: RequestInit }> = []
+    const fetchMock = jest.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      calls.push({ url: String(input), options })
+      return success({})
+    })
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: fetchMock as typeof fetch,
+    })
+    const eventId = '00000000-0000-4000-8000-000000000001'
+    const guestId = '00000000-0000-4000-8000-000000000002'
+
+    await client.events.listGuests(eventId, { status: ['pending', 'yes'], q: 'Naledi' })
+    await client.events.getGuest(eventId, guestId)
+    await client.events.inviteGuests(eventId, { guests: [{ guest_name: 'Naledi', guest_phone: '+26771000000' }] })
+    await client.events.updateGuest(eventId, guestId, { allowed_plus_ones: 1 })
+    await client.events.removeGuest(eventId, guestId)
+    await client.events.myRsvp(eventId)
+    await client.events.respondRsvp(eventId, { status: 'yes', plus_ones: 1, plus_ones_names: ['Kago'] })
+    await client.events.guestCapacity(eventId)
+    await client.events.unlockGuestCapacity(eventId)
+
+    expect(calls.map(call => [new URL(call.url).pathname, call.options?.method])).toEqual([
+      [`/api/v1/events/${eventId}/guests`, 'GET'],
+      [`/api/v1/events/${eventId}/guests/${guestId}`, 'GET'],
+      [`/api/v1/events/${eventId}/guests`, 'POST'],
+      [`/api/v1/events/${eventId}/guests/${guestId}`, 'PATCH'],
+      [`/api/v1/events/${eventId}/guests/${guestId}`, 'DELETE'],
+      [`/api/v1/events/${eventId}/rsvp`, 'GET'],
+      [`/api/v1/events/${eventId}/rsvp`, 'PUT'],
+      [`/api/v1/events/${eventId}/guest-capacity`, 'GET'],
+      [`/api/v1/events/${eventId}/guest-capacity`, 'POST'],
+    ])
+    expect(new URL(calls[0].url).searchParams.getAll('status')).toEqual(['pending', 'yes'])
+    expect(calls[2].options?.body).toBe(JSON.stringify({ guests: [{ guest_name: 'Naledi', guest_phone: '+26771000000' }] }))
+    expect(calls[6].options?.body).toBe(JSON.stringify({ status: 'yes', plus_ones: 1, plus_ones_names: ['Kago'] }))
+  })
+
+  it('exposes profile, notification, invite, connection, and reward operations', async () => {
+    const calls: Array<{ url: string; options?: RequestInit }> = []
+    const fetchMock = jest.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      calls.push({ url: String(input), options })
+      return success({})
+    })
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await client.users.updateMe({ name: 'Naledi' })
+    await client.users.searchConnections({ q: 'na' })
+    await client.notifications.markRead(['00000000-0000-4000-8000-000000000001'])
+    await client.events.respondOrganiserInvite({
+      invite_id: '00000000-0000-4000-8000-000000000002',
+      accepted: true,
+    })
+    await client.rewards.markSeen('00000000-0000-4000-8000-000000000003')
+
+    expect(calls.map(call => [new URL(call.url).pathname, call.options?.method])).toEqual([
+      ['/api/v1/users/me', 'PATCH'],
+      ['/api/v1/users/connections', 'GET'],
+      ['/api/v1/notifications', 'PATCH'],
+      ['/api/v1/events/organiser-invites/respond', 'POST'],
+      ['/api/v1/rewards/00000000-0000-4000-8000-000000000003/seen', 'PATCH'],
+    ])
+    expect(new URL(calls[1].url).searchParams.get('q')).toBe('na')
+    expect(calls[2].options?.body).toBe(JSON.stringify({
+      notification_ids: ['00000000-0000-4000-8000-000000000001'],
+    }))
+  })
+
+  it('uses the financial mutation and receipt-session routes', async () => {
+    const calls: Array<{ url: string; options?: RequestInit }> = []
+    const fetchMock = jest.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      calls.push({ url: String(input), options })
+      return success({})
+    })
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: fetchMock as typeof fetch,
+    })
+
+    await client.contributions.assignDetected({
+      fund_id: '00000000-0000-4000-8000-000000000001',
+      detected: { amount: 250 },
+    })
+    await client.expenses.create({
+      fund_id: '00000000-0000-4000-8000-000000000001',
+      items: [{ description: 'Catering', amount: '250.00', currency_code: 'BWP' }],
+    })
+    await client.expenses.remove('00000000-0000-4000-8000-000000000003')
+    await client.receipts.createUploadSession({
+      fund_id: '00000000-0000-4000-8000-000000000001',
+      content_type: 'image/jpeg',
+      size_bytes: 1024,
+    })
+    await client.receipts.parse({
+      fund_id: '00000000-0000-4000-8000-000000000001',
+      object_path: '00000000-0000-4000-8000-000000000001/00000000-0000-4000-8000-000000000002/receipt.jpg',
+    })
+
+    expect(calls.map(call => [new URL(call.url).pathname, call.options?.method])).toEqual([
+      ['/api/v1/contributions/detected-assignment', 'POST'],
+      ['/api/v1/expenses', 'POST'],
+      ['/api/v1/expenses/00000000-0000-4000-8000-000000000003', 'DELETE'],
+      ['/api/v1/receipts/upload-session', 'POST'],
+      ['/api/v1/receipts/parse', 'POST'],
+    ])
+  })
+
+  it('uses the Rich Auntie eligibility, award, history, celebration, and status routes', async () => {
+    const calls: Array<{ url: string; options?: RequestInit }> = []
+    const fetchMock = jest.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+      calls.push({ url: String(input), options })
+      return success({})
+    })
+    const client = createTsheloApiClient({
+      baseUrl: 'https://api.tshelo.example',
+      getAccessToken: async () => 'access-token',
+      fetch: fetchMock as typeof fetch,
+    })
+    const fundId = '00000000-0000-4000-8000-000000000001'
+    const userId = '00000000-0000-4000-8000-000000000002'
+    const awardId = '00000000-0000-4000-8000-000000000003'
+
+    await client.richAuntie.eligibility(fundId, userId)
+    await client.richAuntie.listAwards({ recipient_user_id: userId })
+    await client.richAuntie.createAward({
+      fund_id: fundId,
+      recipient_user_id: userId,
+      reason_code: 'major_contribution',
+      reason_label: 'Major contribution',
+      notify_member: true,
+    })
+    await client.richAuntie.recipientHistory(userId)
+    await client.richAuntie.celebration(awardId)
+    await client.richAuntie.status()
+
+    expect(calls.map(call => [new URL(call.url).pathname, call.options?.method])).toEqual([
+      ['/api/v1/rich-auntie/eligibility', 'GET'],
+      ['/api/v1/rich-auntie/awards', 'GET'],
+      ['/api/v1/rich-auntie/awards', 'POST'],
+      [`/api/v1/rich-auntie/recipients/${userId}/history`, 'GET'],
+      [`/api/v1/rich-auntie/celebrations/${awardId}`, 'GET'],
+      ['/api/v1/rich-auntie/status', 'GET'],
+    ])
+    expect(new URL(calls[0].url).searchParams.get('fund_id')).toBe(fundId)
+  })
+
+  it('adapts Supabase getSession and refreshSession without exposing refresh tokens', async () => {
+    const provider = createSupabaseTokenProvider({
+      getSession: async () => ({
+        data: { session: { access_token: 'current-token' } },
+        error: null,
+      }),
+      refreshSession: async () => ({
+        data: { session: { access_token: 'refreshed-token' } },
+        error: null,
+      }),
+    })
+
+    await expect(provider.getAccessToken()).resolves.toBe('current-token')
+    await expect(provider.refreshAccessToken()).resolves.toBe('refreshed-token')
+  })
+})

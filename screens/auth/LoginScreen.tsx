@@ -1,0 +1,310 @@
+import { useState } from 'react'
+import {
+  View, Text, StyleSheet, TouchableOpacity, StatusBar, TextInput, KeyboardAvoidingView, Platform, ScrollView, ActivityIndicator, Alert } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+import Ionicons from '@expo/vector-icons/Ionicons'
+import { NativeStackNavigationProp } from '@react-navigation/native-stack'
+import { AuthStackParamList } from '../../navigation/types'
+import { colors } from '../../theme/colors'
+import { fonts } from '../../theme/typography'
+import { supabase } from '../../lib/supabase'
+import { useTheme } from '../../context/ThemeContext'
+import { useRequireOnline } from '../../context/ConnectivityContext'
+import CountryPickerModal from '../../components/CountryPickerModal'
+import { findSignupCountry } from '../../lib/countries'
+import {
+  internationalPhone,
+  isValidNationalPhone,
+  nationalPhoneDigits,
+  phoneInputConfig,
+} from '../../lib/phoneNumbers'
+import { useTabletLayout } from '../../lib/useTabletLayout'
+
+type Props = {
+  navigation: NativeStackNavigationProp<AuthStackParamList, 'Login'>
+}
+
+export default function LoginScreen({ navigation }: Props) {
+  const { isDark } = useTheme()
+  const { isTablet } = useTabletLayout()
+  const requireOnline = useRequireOnline()
+  const bg       = isDark ? '#1A1C24' : '#F4F2EB'
+  const inputBg  = isDark ? '#2D2E41' : '#FFFFFF'
+  const textCol  = isDark ? '#F2F2F7' : colors.textPrimary
+  const mutedCol = isDark ? '#8A8A9A' : colors.textMuted
+  const borderCol = isDark ? '#3A3A5C' : colors.border
+
+  const [phone, setPhone] = useState('')
+  const [email, setEmail] = useState('')
+  const [method, setMethod] = useState<'phone' | 'email'>('phone')
+  const [focused, setFocused] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [selectedCountry, setSelectedCountry] = useState(() => findSignupCountry('BW')!)
+
+  const cleanedPhone = nationalPhoneDigits(phone)
+  const phoneConfig = phoneInputConfig(selectedCountry.code, selectedCountry.dialCode)
+  const normalizedEmail = email.trim().toLowerCase()
+  const isValid = method === 'phone' ? isValidNationalPhone(cleanedPhone, phoneConfig) : /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+
+  async function handleSendOTP() {
+    if (!isValid) return
+    if (!requireOnline()) return
+    const fullPhone = internationalPhone(selectedCountry.dialCode, cleanedPhone)
+    setLoading(true)
+    try {
+      const { error } = await supabase.auth.signInWithOtp(method === 'phone'
+        ? { phone: fullPhone, options: { shouldCreateUser: false } }
+        : { email: normalizedEmail, options: { shouldCreateUser: false } })
+      if (error) throw error
+      navigation.navigate('OTP', { phone: method === 'phone' ? fullPhone : '', ...(method === 'email' ? { email: normalizedEmail } : {}), mode: 'login' })
+    } catch {
+      Alert.alert('Code not sent', 'Check your sign-in details and try again.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <SafeAreaView style={[styles.safe, { backgroundColor: bg }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={bg} />
+
+      <KeyboardAvoidingView
+        style={styles.flex}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <ScrollView
+          contentContainerStyle={[styles.scroll, isTablet && styles.scrollTablet]}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          <TouchableOpacity style={[styles.backButton, { backgroundColor: inputBg, borderColor: borderCol }]} onPress={() => navigation.goBack()}>
+            <Ionicons name="arrow-back" size={20} color={textCol} />
+          </TouchableOpacity>
+
+          <View style={styles.header}>
+            <Text style={styles.heading}>Welcome back</Text>
+            <Text style={[styles.subheading, { color: mutedCol }]}>
+              Sign in with your verified mobile number or email address.
+            </Text>
+          </View>
+
+          <View style={styles.form}>
+            <View style={styles.methodTabs} accessibilityRole="tablist">
+              <TouchableOpacity accessibilityRole="tab" accessibilityState={{ selected: method === 'phone' }} onPress={() => setMethod('phone')} style={[styles.methodTab, method === 'phone' && styles.methodTabSelected]}><Text style={[styles.methodText, method === 'phone' && styles.methodTextSelected]}>Mobile number</Text></TouchableOpacity>
+              <TouchableOpacity accessibilityRole="tab" accessibilityState={{ selected: method === 'email' }} onPress={() => setMethod('email')} style={[styles.methodTab, method === 'email' && styles.methodTabSelected]}><Text style={[styles.methodText, method === 'email' && styles.methodTextSelected]}>Email address</Text></TouchableOpacity>
+            </View>
+            {method === 'phone' ? <>
+            <Text style={[styles.label, { color: textCol }]}>Phone Number</Text>
+            <View style={[styles.phoneRow, { backgroundColor: inputBg, borderColor: focused ? colors.primary : borderCol }]}>
+              <TouchableOpacity
+                style={styles.countryCode}
+                onPress={() => setPickerOpen(true)}
+                accessibilityRole="button"
+                accessibilityLabel={`Change country, currently ${selectedCountry.name} ${selectedCountry.dialCode}`}
+              >
+                <Text style={styles.countryFlag}>{selectedCountry.flag}</Text>
+                <Text style={[styles.countryCodeText, { color: textCol }]}>{selectedCountry.dialCode}</Text>
+                <Ionicons name="chevron-down" size={14} color={mutedCol} />
+              </TouchableOpacity>
+              <View style={[styles.divider, { backgroundColor: borderCol }]} />
+              <TextInput
+                style={[styles.phoneInput, { color: textCol }]}
+                placeholder={phoneConfig.placeholder}
+                placeholderTextColor={mutedCol}
+                keyboardType="phone-pad"
+                value={phone}
+                onChangeText={setPhone}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                maxLength={phoneConfig.maxDigits + 4}
+                returnKeyType="done"
+                onSubmitEditing={handleSendOTP}
+              />
+            </View>
+            <Text style={[styles.hint, { color: mutedCol }]}>
+              Enter the number without {selectedCountry.dialCode}. We’ll send a one-time code to verify it’s you.
+            </Text>
+            </> : <>
+              <Text style={[styles.label, { color: textCol }]}>Email address</Text>
+              <View style={[styles.phoneRow, { backgroundColor: inputBg, borderColor: focused ? colors.primary : borderCol }]}>
+                <TextInput style={[styles.phoneInput, { color: textCol }]} placeholder="you@example.com" placeholderTextColor={mutedCol} keyboardType="email-address" autoCapitalize="none" autoCorrect={false} autoComplete="email" value={email} onChangeText={setEmail} onFocus={() => setFocused(true)} onBlur={() => setFocused(false)} returnKeyType="done" onSubmitEditing={handleSendOTP} />
+              </View>
+              <Text style={[styles.hint, { color: mutedCol }]}>We’ll send a one-time code to your verified email address.</Text>
+            </>}
+          </View>
+
+          <TouchableOpacity
+            style={[styles.primaryButton, isValid && styles.buttonActive]}
+            onPress={handleSendOTP}
+            activeOpacity={isValid ? 0.85 : 1}
+            disabled={loading}
+          >
+            {loading
+              ? <ActivityIndicator color="#fff" />
+              : <Text style={[styles.primaryButtonText, isValid && styles.primaryButtonTextActive]}>Send Code</Text>
+            }
+          </TouchableOpacity>
+
+          <View style={styles.footer}>
+            <Text style={[styles.footerText, { color: textCol }]}>Don't have an account? </Text>
+            <TouchableOpacity onPress={() => navigation.replace('CountrySelect')}>
+              <Text style={styles.footerLink}>Create One</Text>
+            </TouchableOpacity>
+          </View>
+
+          <TouchableOpacity
+            onPress={() => navigation.navigate('ReviewLogin')}
+            accessibilityRole="button"
+            accessibilityLabel="Google Play reviewer access"
+            style={styles.reviewAccessLink}
+          >
+            <Text style={styles.reviewAccessText}>Google Play reviewer access</Text>
+          </TouchableOpacity>
+        </ScrollView>
+
+      </KeyboardAvoidingView>
+
+      <CountryPickerModal
+        visible={pickerOpen}
+        selectedCode={selectedCountry.code}
+        onSelect={country => {
+          setSelectedCountry(country)
+          setPhone('')
+          setPickerOpen(false)
+        }}
+        onClose={() => setPickerOpen(false)}
+      />
+    </SafeAreaView>
+  )
+}
+
+const styles = StyleSheet.create({
+  safe:  { flex: 1 },
+  flex:  { flex: 1 },
+  scroll: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    paddingBottom: 48,
+  },
+  scrollTablet: {
+    width: '100%',
+    maxWidth: 560,
+    alignSelf: 'center',
+    paddingHorizontal: 0,
+    paddingTop: 40,
+  },
+  backButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 36,
+    borderWidth: 1,
+  },
+  header: { marginBottom: 36 },
+  heading: {
+    fontSize: 30,
+    fontFamily: fonts.display.bold,
+    color: '#9D86FF',
+    marginBottom: 8,
+  },
+  subheading: {
+    fontSize: 15,
+    color: colors.textSecondary,
+    lineHeight: 22,
+  },
+  form: { marginBottom: 28 },
+  methodTabs: { flexDirection: 'row', backgroundColor: '#EAE6F3', padding: 4, borderRadius: 14, marginBottom: 24 },
+  methodTab: { flex: 1, minHeight: 42, alignItems: 'center', justifyContent: 'center', borderRadius: 10 },
+  methodTabSelected: { backgroundColor: '#FFFFFF' },
+  methodText: { fontSize: 13, color: '#615B70', fontWeight: '600' },
+  methodTextSelected: { color: colors.primary },
+  label: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textPrimary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    marginBottom: 10,
+  },
+  phoneRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderRadius: 16,
+    overflow: 'hidden',
+    marginBottom: 8,
+  },
+  countryCode: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 16,
+    gap: 6,
+  },
+  countryFlag: { fontSize: 18 },
+  countryCodeText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+  },
+  divider: {
+    width: 1,
+    height: 24,
+  },
+  phoneInput: {
+    flex: 1,
+    fontSize: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 16,
+  },
+  hint: {
+    fontSize: 12,
+    color: '#4A4A4A',
+    lineHeight: 18,
+  },
+  primaryButton: {
+    backgroundColor: '#D4D4D8',
+    borderRadius: 28,
+    paddingVertical: 17,
+    alignItems: 'center',
+    marginBottom: 24,
+  },
+  buttonActive: {
+    backgroundColor: colors.primary,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  primaryButtonText: {
+    color: '#676767',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+  primaryButtonTextActive: {
+    color: '#FFFFFF',
+  },
+  footer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    marginBottom: 14,
+  },
+  footerText: { fontSize: 14, color: colors.textSecondary },
+  footerLink: { fontSize: 14, fontWeight: '700', color: colors.primaryMid },
+  reviewAccessLink: {
+    alignSelf: 'center',
+    marginTop: 16,
+    paddingVertical: 8,
+  },
+  reviewAccessText: {
+    color: colors.textMuted,
+    fontSize: 12,
+    textDecorationLine: 'underline',
+  },
+})

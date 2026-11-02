@@ -32,6 +32,7 @@ yarn-error.*
 
 # local env files
 .env*.local
+.vercel/
 
 # typescript
 *.tsbuildinfo
@@ -40,3 +41,27 @@ yarn-error.*
 /ios
 /android
 .env
+
+# MCP config contains a Supabase access token — never commit
+.mcp.json
+
+# Firebase service account keys — never commit
+*firebase-adminsdk*.json
+
+# Supabase CLI temp files
+supabase/.temp/
+
+# Local reports, renders, and native module build artifacts
+/output/
+/tmp/
+/modules/sms-listener/android/build/
+.vercel
+.env*
+
+# MFA browser-test outputs may contain ephemeral authentication material.
+security/e2e/test-results/
+security/e2e/playwright-report/
+security/e2e/mfa-e2e-evidence.json
+
+# Local agent worktrees are not deployable submodules.
+.claude/worktrees/

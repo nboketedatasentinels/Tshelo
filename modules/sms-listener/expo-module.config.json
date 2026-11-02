@@ -1,0 +1,6 @@
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": ["com.tshelo.app.smslistener.SmsListenerModule"]
+  }
+}
