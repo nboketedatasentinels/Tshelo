@@ -1,0 +1,341 @@
+import { useMemo, useState } from 'react'
+import {
+  ActivityIndicator, Alert, View, Text, StyleSheet, TouchableOpacity, StatusBar, ScrollView } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+import Ionicons from '@expo/vector-icons/Ionicons'
+import { NativeStackNavigationProp } from '@react-navigation/native-stack'
+import { RouteProp } from '@react-navigation/native'
+import { AuthStackParamList, BankAccount, MobileMoneyNumber } from '../../navigation/types'
+import { colors } from '../../theme/colors'
+import { fonts } from '../../theme/typography'
+import { useTheme } from '../../context/ThemeContext'
+import { useRequireOnline } from '../../context/ConnectivityContext'
+import ProviderLogo from '../../components/ProviderLogo'
+import { api } from '../../lib/api'
+import { toApiUiError } from '../../lib/apiScreen'
+import { PROVIDER_LABELS, detectProvider, detectProviderOrUnknown } from '../../lib/providers'
+import { useTabletLayout } from '../../lib/useTabletLayout'
+
+type Props = {
+  navigation: NativeStackNavigationProp<AuthStackParamList, 'ReceiveMoney'>
+  route:      RouteProp<AuthStackParamList, 'ReceiveMoney'>
+}
+
+function formatPhone(phone: string) {
+  const digits = phone.replace(/\D/g, '').replace(/^267/, '')
+  return digits.length === 8 ? `+267 ${digits.slice(0, 2)} ${digits.slice(2, 5)} ${digits.slice(5)}` : phone
+}
+
+function maskAccount(accountNumber?: string) {
+  const digits = accountNumber?.replace(/\D/g, '') ?? ''
+  if (!digits) return ''
+  return `****${digits.slice(-4)}`
+}
+
+function makeBankAccounts(params: Props['route']['params']): BankAccount[] {
+  if (params.bankAccounts?.length) return params.bankAccounts
+  if (params.bankName && params.accountNumber) {
+    return [{
+      id: 'primary-bank',
+      bankName: params.bankName,
+      branchCode: '',
+      accountNumber: params.accountNumber,
+    }]
+  }
+  return []
+}
+
+export default function ReceiveMoneyScreen({ navigation, route }: Props) {
+  const { isDark } = useTheme()
+  const { isTablet } = useTabletLayout()
+  const requireOnline = useRequireOnline()
+  const [confirmed, setConfirmed] = useState(false)
+  const [saving, setSaving] = useState(false)
+  const bg       = isDark ? '#1A1C24' : colors.background
+  const textCol  = isDark ? '#F2F2F7' : '#141414'
+  const mutedCol = isDark ? '#A1A1AA' : colors.textMuted
+
+  const mobileMoneyNumbers = useMemo(() => {
+    const numbers = [...route.params.mobileMoneyNumbers]
+    if (route.params.registeredPhone && !numbers.some(n => n.phone === route.params.registeredPhone)) {
+      numbers.unshift({
+        id: 'registered',
+        phone: route.params.registeredPhone,
+        provider: detectProviderOrUnknown(route.params.registeredPhone),
+      })
+    }
+    return numbers
+  }, [route.params.mobileMoneyNumbers, route.params.registeredPhone])
+
+  const hasMobileMoney = mobileMoneyNumbers.length > 0
+  const bankAccounts = useMemo(() => makeBankAccounts(route.params), [route.params])
+  const hasBank = bankAccounts.length > 0
+
+  async function handleContinue() {
+    if (!confirmed || saving || !requireOnline()) return
+    const primaryBank = bankAccounts[0]
+    const provider = route.params.registeredPhone ? detectProvider(route.params.registeredPhone) : null
+    setSaving(true)
+    try {
+      await api.users.updateMe({
+        ...(route.params.name?.trim() ? { name: route.params.name.trim() } : {}),
+        ...(provider ? { mobile_money_provider: provider } : {}),
+        ...(primaryBank ? {
+          bank_name: primaryBank.bankName,
+          bank_branch_code: primaryBank.branchCode,
+          bank_account_number: primaryBank.accountNumber,
+        } : {}),
+      })
+      navigation.navigate('RegistrationSuccess')
+    } catch (error) {
+      Alert.alert('Could not save payment details', toApiUiError(error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <SafeAreaView style={[styles.safe, { backgroundColor: bg }]}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={bg} />
+      <ScrollView contentContainerStyle={[styles.scroll, isTablet && styles.scrollTablet]} showsVerticalScrollIndicator={false}>
+        <Text style={[styles.heading, { color: textCol }]}>How you'll receive money</Text>
+        <Text style={[styles.subheading, { color: mutedCol }]}>Contributors can send to:</Text>
+
+        {hasMobileMoney && (
+          <View style={[styles.optionCard, styles.mobileCard]}>
+            <View style={styles.optionHeader}>
+              <View style={[styles.optionIcon, styles.mobileIcon]}>
+                <Ionicons name="phone-portrait-outline" size={22} color="#FFFFFF" />
+              </View>
+              <View style={styles.mobileHeadingRow}>
+                <Text style={styles.mobileTitle}>Mobile Money</Text>
+                <Text style={styles.mobileStatus}>Verified ✓</Text>
+              </View>
+            </View>
+            <View style={styles.detailBox}>
+              {mobileMoneyNumbers.map((item, index) => (
+                <View
+                  key={item.id}
+                  style={[{ flexDirection: 'row', alignItems: 'center', gap: 10 }, index > 0 && styles.detailDivider]}
+                >
+                  <ProviderLogo provider={item.provider} width={44} />
+                  <View>
+                    <Text style={styles.detailLabel}>{PROVIDER_LABELS[item.provider]}</Text>
+                    <Text style={styles.detailValue}>{formatPhone(item.phone)}</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {hasBank && (
+          <View style={[styles.optionCard, styles.bankCard]}>
+            <View style={styles.optionHeader}>
+              <View style={[styles.optionIcon, styles.bankIcon]}>
+                <Ionicons name="card-outline" size={22} color="#FFFFFF" />
+              </View>
+              <View>
+                <Text style={styles.bankTitle}>Bank{'\n'}Transfer</Text>
+                <Text style={styles.bankStatus}>Added ✓</Text>
+              </View>
+            </View>
+            <View style={styles.detailBox}>
+              {bankAccounts.map((account, index) => (
+                <View key={account.id} style={index > 0 && styles.detailDivider}>
+                  <Text style={styles.detailLabel}>{account.bankName}</Text>
+                  <Text style={styles.detailValue}>{maskAccount(account.accountNumber)}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        <TouchableOpacity
+          style={styles.confirmRow}
+          onPress={() => setConfirmed(v => !v)}
+          activeOpacity={0.8}
+          disabled={saving}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: confirmed, disabled: saving }}
+        >
+          <View testID="confirmation-checkbox" style={[styles.checkbox, confirmed && styles.checkboxChecked]}>
+            {confirmed && <Ionicons name="checkmark" size={17} color="#FFFFFF" />}
+          </View>
+          <Text style={[styles.confirmText, { color: textCol }]}>
+            I confirm these are MY accounts and I will receive contributions here.
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.primaryButton, (!confirmed || saving) && styles.primaryButtonDisabled]}
+          onPress={() => { void handleContinue() }}
+          activeOpacity={confirmed && !saving ? 0.85 : 1}
+          disabled={!confirmed || saving}
+        >
+          {saving
+            ? <ActivityIndicator color="#FFFFFF" />
+            : <Text style={styles.primaryButtonText}>Confirm &amp; Continue</Text>}
+        </TouchableOpacity>
+      </ScrollView>
+    </SafeAreaView>
+  )
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1 },
+  scroll: {
+    flexGrow: 1,
+    paddingHorizontal: 24,
+    paddingTop: 40,
+    paddingBottom: 48,
+  },
+  scrollTablet: {
+    width: '100%',
+    maxWidth: 560,
+    alignSelf: 'center',
+    paddingHorizontal: 0,
+    paddingTop: 56,
+  },
+  heading: {
+    fontSize: 28,
+    lineHeight: 35,
+    fontFamily: fonts.display.bold,
+    fontWeight: '800',
+    marginBottom: 8,
+  },
+  subheading: {
+    fontSize: 14,
+    lineHeight: 21,
+    marginBottom: 22,
+  },
+  optionCard: {
+    borderWidth: 1.5,
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+  },
+  mobileCard: {
+    backgroundColor: '#D7F8E4',
+    borderColor: '#7DEC9F',
+  },
+  bankCard: {
+    backgroundColor: '#D9E8FF',
+    borderColor: '#8AC5FF',
+  },
+  optionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 12,
+  },
+  optionIcon: {
+    width: 48,
+    height: 48,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mobileIcon: { backgroundColor: '#16A34A' },
+  bankIcon:   { backgroundColor: '#2255D9' },
+  mobileTitle: {
+    color: '#14763C',
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '800',
+  },
+  mobileHeadingRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 8,
+  },
+  mobileStatus: {
+    color: '#21A650',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  bankTitle: {
+    color: '#2453C7',
+    fontSize: 18,
+    lineHeight: 22,
+    fontWeight: '800',
+  },
+  bankStatus: {
+    color: '#2453C7',
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 2,
+  },
+  detailBox: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  detailLabel: {
+    color: '#8E8E93',
+    fontSize: 14,
+    lineHeight: 20,
+    marginBottom: 4,
+  },
+  detailValue: {
+    color: '#18181B',
+    fontSize: 18,
+    fontWeight: '800',
+  },
+  detailDivider: {
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB',
+    marginTop: 10,
+    paddingTop: 10,
+  },
+  confirmRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 12,
+    marginTop: 8,
+    marginBottom: 24,
+  },
+  checkbox: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: '#D1D5DB',
+    borderWidth: 1,
+    borderColor: '#C4C7CE',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkboxChecked: {
+    backgroundColor: '#6F4DE8',
+    borderColor: '#6F4DE8',
+  },
+  confirmText: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 21,
+    fontWeight: '500',
+  },
+  primaryButton: {
+    borderRadius: 28,
+    backgroundColor: colors.primary,
+    paddingVertical: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 6,
+  },
+  primaryButtonDisabled: {
+    opacity: 0.5,
+  },
+  primaryButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.2,
+  },
+})

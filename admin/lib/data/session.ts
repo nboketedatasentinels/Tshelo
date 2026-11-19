@@ -1,0 +1,43 @@
+import 'server-only'
+
+import type { ServerClient } from './client'
+import { onboardingPathFor } from '@/lib/post-login'
+
+export type SignedInDestination = '/mfa' | '/' | '/account/overview' | `/account${string}` | `/onboarding${string}` | null
+
+export async function getSignedInDestination(client: ServerClient, requestedPath?: `/account${string}` | null): Promise<SignedInDestination> {
+  const {
+    data: { user },
+  } = await client.auth.getUser()
+
+  if (!user) return null
+
+  const [{ data: admin }, { data: appUser }] = await Promise.all([
+    client
+      .from('platform_admins')
+      .select('user_id')
+      .eq('user_id', user.id)
+      .eq('is_active', true)
+      .maybeSingle(),
+    client
+      .from('users')
+      .select('id, profile_completed')
+      .eq('id', user.id)
+      .eq('is_banned', false)
+      .is('deleted_at', null)
+      .maybeSingle(),
+  ])
+
+  if (appUser && !admin && !appUser.profile_completed) {
+    return onboardingPathFor(requestedPath ?? '')
+  }
+  if (appUser && requestedPath) {
+    return requestedPath
+  }
+  if (admin) {
+    const { data, error } = await client.auth.mfa.getAuthenticatorAssuranceLevel()
+    return !error && data?.currentLevel === 'aal2' ? '/' : '/mfa'
+  }
+  if (appUser) return '/account/overview'
+  return null
+}

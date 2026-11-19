@@ -1,0 +1,573 @@
+import { useCallback, useState } from 'react'
+import {
+  View, Text, StyleSheet, TouchableOpacity, StatusBar, ScrollView, Alert, Linking } from 'react-native'
+import { SafeAreaView } from 'react-native-safe-area-context'
+import { useFocusEffect } from '@react-navigation/native'
+import { useTheme } from '../../context/ThemeContext'
+import { useAuth } from '../../context/AuthContext'
+import type { AppColors } from '../../theme/themes'
+import { fonts } from '../../theme/typography'
+import { buildTokenPortalUrl, TOKEN_PORTAL_URL } from '../../lib/tokenPortal'
+import {
+  CHECKOUT_OFFERS,
+  TOKEN_FEATURE_PRICES,
+  isTokenPack,
+  tokenPriceLabel,
+  type CheckoutOffer,
+  type CheckoutOfferId,
+} from '../../lib/tokenPricing'
+
+type Props = {
+  navigation: any
+  route?: { name?: string }
+}
+
+const TOKEN_USES = [
+  { icon: '✨', action: 'Create an Event + Fund', cost: TOKEN_FEATURE_PRICES.eventFund },
+  { icon: '📁', action: 'First event and first fund', cost: 0, note: 'Free' },
+  { icon: '📂', action: 'Each additional event or fund', cost: TOKEN_FEATURE_PRICES.additionalFund },
+  { icon: '📄', action: 'Interim PDF report', cost: TOKEN_FEATURE_PRICES.interimPdf },
+  { icon: '🛡️', action: 'Certified audit report', cost: TOKEN_FEATURE_PRICES.certifiedAudit },
+  { icon: '🔒', action: 'Final report when a fund closes', cost: 0, note: 'Free' },
+]
+
+type Styles = ReturnType<typeof makeStyles>
+
+function OfferCard({
+  offer,
+  selected,
+  onSelect,
+  styles,
+}: {
+  offer: CheckoutOffer
+  selected: boolean
+  onSelect: () => void
+  styles: Styles
+}) {
+  const isTopUp = isTokenPack(offer)
+  const offerValue = isTopUp ? `${offer.tokens} tokens` : '12-month pass'
+  const accessibilityLabel = [
+    offer.label,
+    offerValue,
+    `${offer.priceBWP} Botswana pula`,
+    offer.description,
+    !isTopUp ? offer.termLabel : null,
+  ].filter(Boolean).join('. ')
+
+  return (
+    <TouchableOpacity
+      style={[styles.packCard, selected && styles.packCardSelected]}
+      onPress={onSelect}
+      activeOpacity={0.85}
+      accessibilityRole="radio"
+      accessibilityState={{ checked: selected }}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={selected ? undefined : 'Selects this checkout option'}
+    >
+      <View style={styles.packTop}>
+        <View>
+          <Text style={styles.packLabel}>{offer.label}</Text>
+          <Text style={styles.packPerToken}>
+            {isTopUp ? tokenPriceLabel(offer.priceBWP, offer.tokens) : offer.termLabel}
+          </Text>
+        </View>
+        <View style={styles.radioOuter}>
+          {selected && <View style={styles.radioInner} />}
+        </View>
+      </View>
+
+      <View style={styles.packMiddle}>
+        {isTopUp ? (
+          <Text style={styles.packTokenCount}>
+            🪙 <Text style={styles.packTokenNumber}>{offer.tokens}</Text> tokens
+          </Text>
+        ) : (
+          <Text style={styles.packTokenCount}>Annual pass</Text>
+        )}
+        <Text style={styles.packPrice}>P{offer.priceBWP}</Text>
+      </View>
+
+      <Text style={styles.packDescription}>{offer.description}</Text>
+      {!isTopUp && (
+        <View style={styles.passIncludes}>
+          {offer.includes.map((item) => <Text key={item} style={styles.passInclude}>• {item}</Text>)}
+        </View>
+      )}
+    </TouchableOpacity>
+  )
+}
+
+export default function TokenPurchaseScreen({ navigation, route }: Props) {
+  const { colors, isDark } = useTheme()
+  const { tokenBalance, refreshProfile, isGooglePlayReviewer } = useAuth()
+  const styles = makeStyles(colors)
+
+  const [selectedOfferId, setSelectedOfferId] = useState<CheckoutOfferId>('top_up_60')
+  const currentBalance = tokenBalance
+  const isTab = route?.name === 'Tokens'
+
+  const selectedOffer = CHECKOUT_OFFERS.find((offer) => offer.id === selectedOfferId) ?? CHECKOUT_OFFERS[0]
+  const selectedIsTopUp = isTokenPack(selectedOffer)
+  const checkoutUrl = buildTokenPortalUrl(TOKEN_PORTAL_URL, selectedOffer.id)
+
+  useFocusEffect(useCallback(() => {
+    void refreshProfile()
+  }, [refreshProfile]))
+
+  async function handlePurchase() {
+    if (isGooglePlayReviewer) {
+      Alert.alert('Unavailable in review mode', 'Purchases are disabled for the Google Play review account.')
+      return
+    }
+    if (!checkoutUrl) return
+
+    if (!await Linking.canOpenURL(checkoutUrl)) {
+      Alert.alert('Could not open checkout', 'Please try again or visit the Tshelo website in your browser.')
+      return
+    }
+    await Linking.openURL(checkoutUrl)
+  }
+
+  return (
+    <SafeAreaView style={styles.safe}>
+      <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} backgroundColor={colors.background} />
+
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── Header ───────────────────────────────── */}
+        <View style={styles.topRow}>
+          {isTab ? <View /> : (
+            <TouchableOpacity style={styles.backButton} onPress={() => navigation.goBack()}>
+              <Text style={styles.backIcon}>←</Text>
+            </TouchableOpacity>
+          )}
+          <View style={styles.balanceBadge}>
+            <Text style={styles.balanceEmoji}>🪙</Text>
+            <Text style={styles.balanceText}>{currentBalance} tokens</Text>
+          </View>
+        </View>
+
+        <View style={styles.header}>
+          <Text style={styles.heading}>Tshelo Pricing</Text>
+          <Text style={styles.subheading}>
+            Choose a token top-up or a dated annual pass. Tokens are separate from trust points.
+          </Text>
+        </View>
+
+        {isGooglePlayReviewer && (
+          <View style={styles.reviewNotice}>
+            <Text style={styles.reviewNoticeTitle}>Google Play review mode</Text>
+            <Text style={styles.reviewNoticeText}>Purchases and paid upgrades are disabled for this sample account.</Text>
+          </View>
+        )}
+
+        {/* ── What tokens do ───────────────────────── */}
+        <View style={styles.usesCard}>
+          <Text style={styles.usesTitle}>What tokens unlock</Text>
+          {TOKEN_USES.map(u => (
+            <View key={u.action} style={styles.useRow}>
+              <Text style={styles.useIcon}>{u.icon}</Text>
+              <Text style={styles.useAction}>{u.action}</Text>
+              <Text style={styles.useCost}>
+                {u.note ?? `🪙 ${u.cost}`}
+              </Text>
+            </View>
+          ))}
+        </View>
+
+        {/* ── Pack selector ────────────────────────── */}
+        <Text style={styles.sectionLabel}>Choose an option</Text>
+        <View
+          style={styles.packGrid}
+          accessibilityRole="radiogroup"
+          accessibilityLabel="Token and annual pass options"
+        >
+          {CHECKOUT_OFFERS.map((offer) => (
+            <OfferCard
+              key={offer.id}
+              offer={offer}
+              selected={selectedOfferId === offer.id}
+              onSelect={() => setSelectedOfferId(offer.id)}
+              styles={styles}
+            />
+          ))}
+        </View>
+
+        {/* ── Order summary ────────────────────────── */}
+        <View style={styles.summaryCard}>
+          <Text style={styles.summaryTitle}>Order Summary</Text>
+          <View style={styles.summaryRow}>
+            <Text style={styles.summaryLabel}>{selectedOffer.label}</Text>
+            <Text style={styles.summaryValue}>
+              {selectedIsTopUp ? `🪙 ${selectedOffer.tokens} tokens` : '12-month pass'}
+            </Text>
+          </View>
+          <View style={styles.summaryRow}>
+            <Text style={styles.summaryLabel}>Price</Text>
+            <Text style={styles.summaryValue}>P{selectedOffer.priceBWP.toFixed(2)}</Text>
+          </View>
+          {selectedIsTopUp ? (
+            <>
+              <View style={styles.summaryDivider} />
+              <View style={styles.summaryRow}>
+                <Text style={styles.summaryLabelBold}>New Balance</Text>
+                <Text style={styles.summaryValueBold}>
+                  🪙 {currentBalance + selectedOffer.tokens} tokens
+                </Text>
+              </View>
+            </>
+          ) : (
+            <Text style={styles.passSummaryNote}>
+              Starts when payment is confirmed and ends after 12 months. It does not renew automatically.
+            </Text>
+          )}
+        </View>
+
+        {/* ── Checkout action or availability ───────── */}
+        {checkoutUrl && !isGooglePlayReviewer ? (
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={handlePurchase}
+            activeOpacity={0.85}
+            accessibilityRole="button"
+            accessibilityLabel={`Continue to secure checkout, P${selectedOffer.priceBWP.toFixed(2)}`}
+            accessibilityHint="Opens the secure Tshelo website"
+          >
+            <Text style={styles.primaryButtonText}>
+              Continue to secure checkout · P{selectedOffer.priceBWP.toFixed(2)}
+            </Text>
+          </TouchableOpacity>
+        ) : (
+          <View
+            style={styles.checkoutUnavailable}
+            accessible
+            accessibilityRole="text"
+            accessibilityLiveRegion="polite"
+            accessibilityLabel="Secure checkout is being activated. No payment has been taken."
+          >
+            <Text style={styles.checkoutUnavailableText}>
+              Secure checkout is being activated. No payment has been taken.
+            </Text>
+          </View>
+        )}
+
+        {/* ── Payment notice ───────────────────────── */}
+        <View style={styles.paymentNotice}>
+          <Text style={styles.paymentNoticeText}>
+            🛡️ Your balance updates only after the payment provider confirms the order.
+          </Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  )
+}
+
+function makeStyles(colors: AppColors) {
+  return StyleSheet.create({
+    safe: {
+      flex: 1,
+      backgroundColor: colors.background,
+    },
+    scroll: {
+      paddingHorizontal: 24,
+      paddingTop: 16,
+      paddingBottom: 48,
+    },
+    topRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 24,
+    },
+    backButton: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      backgroundColor: colors.surface,
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderWidth: 1,
+      borderColor: colors.border,
+    },
+    backIcon: {
+      fontSize: 20,
+      color: colors.textPrimary,
+    },
+    balanceBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: colors.accentLight,
+      borderRadius: 20,
+      paddingVertical: 8,
+      paddingHorizontal: 14,
+      gap: 6,
+    },
+    balanceEmoji: {
+      fontSize: 15,
+    },
+    balanceText: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    header: {
+      marginBottom: 24,
+    },
+    heading: {
+      fontSize: 30,
+      fontFamily: fonts.display.bold,
+      color: colors.heading,
+      marginBottom: 6,
+    },
+    subheading: {
+      fontSize: 15,
+      color: colors.textSecondary,
+      lineHeight: 22,
+    },
+
+    // ── Uses card ──────────────────────────────────
+    usesCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 28,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 12,
+    },
+    usesTitle: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.textSecondary,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+      marginBottom: 4,
+    },
+    useRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    useIcon: {
+      fontSize: 18,
+      width: 28,
+    },
+    useAction: {
+      flex: 1,
+      fontSize: 14,
+      color: colors.textPrimary,
+      fontWeight: '500',
+    },
+    useCost: {
+      fontSize: 13,
+      fontWeight: '700',
+      color: colors.primary,
+    },
+
+    // ── Pack selector ──────────────────────────────
+    sectionLabel: {
+      fontSize: 13,
+      fontWeight: '600',
+      color: colors.textSecondary,
+      textTransform: 'uppercase',
+      letterSpacing: 0.5,
+      marginBottom: 12,
+    },
+    packGrid: {
+      gap: 12,
+      marginBottom: 24,
+    },
+    packCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 16,
+      borderWidth: 1.5,
+      borderColor: colors.border,
+    },
+    packCardSelected: {
+      borderColor: colors.primary,
+      backgroundColor: colors.primaryLight,
+    },
+    packTop: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'flex-start',
+      marginBottom: 10,
+    },
+    packLabel: {
+      fontSize: 17,
+      fontWeight: '800',
+      color: colors.textPrimary,
+      marginBottom: 2,
+    },
+    packPerToken: {
+      fontSize: 12,
+      color: colors.textMuted,
+      fontWeight: '500',
+    },
+    radioOuter: {
+      width: 22,
+      height: 22,
+      borderRadius: 11,
+      borderWidth: 2,
+      borderColor: colors.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    radioInner: {
+      width: 11,
+      height: 11,
+      borderRadius: 6,
+      backgroundColor: colors.primary,
+    },
+    packMiddle: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginBottom: 8,
+    },
+    packTokenCount: {
+      fontSize: 15,
+      color: colors.textSecondary,
+    },
+    packTokenNumber: {
+      fontWeight: '800',
+      color: colors.textPrimary,
+      fontSize: 18,
+    },
+    packPrice: {
+      fontSize: 20,
+      fontWeight: '800',
+      color: colors.primary,
+    },
+    packDescription: {
+      fontSize: 12,
+      color: colors.textMuted,
+    },
+    passIncludes: {
+      gap: 4,
+      marginTop: 10,
+    },
+    passInclude: {
+      color: colors.textSecondary,
+      fontSize: 12,
+      lineHeight: 17,
+    },
+
+    // ── Summary ────────────────────────────────────
+    summaryCard: {
+      backgroundColor: colors.surface,
+      borderRadius: 16,
+      padding: 16,
+      marginBottom: 16,
+      borderWidth: 1,
+      borderColor: colors.border,
+      gap: 10,
+    },
+    summaryTitle: {
+      fontSize: 14,
+      fontWeight: '700',
+      color: colors.textPrimary,
+      marginBottom: 4,
+    },
+    summaryRow: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    summaryLabel: {
+      fontSize: 14,
+      color: colors.textSecondary,
+    },
+    summaryValue: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: colors.textPrimary,
+    },
+    summaryDivider: {
+      height: 1,
+      backgroundColor: colors.border,
+      marginVertical: 4,
+    },
+    summaryLabelBold: {
+      fontSize: 15,
+      fontWeight: '700',
+      color: colors.textPrimary,
+    },
+    summaryValueBold: {
+      fontSize: 15,
+      fontWeight: '800',
+      color: colors.primary,
+    },
+    passSummaryNote: {
+      color: colors.textMuted,
+      fontSize: 12,
+      lineHeight: 18,
+    },
+    reviewNotice: {
+      backgroundColor: colors.accentLight,
+      borderRadius: 12,
+      padding: 14,
+      marginBottom: 18,
+    },
+    reviewNoticeTitle: {
+      color: colors.textPrimary,
+      fontSize: 13,
+      fontWeight: '700',
+      marginBottom: 4,
+    },
+    reviewNoticeText: {
+      color: colors.textSecondary,
+      fontSize: 12,
+      lineHeight: 18,
+    },
+
+    // ── Payment notice ─────────────────────────────
+    paymentNotice: {
+      backgroundColor: colors.accentLight,
+      borderRadius: 12,
+      padding: 14,
+      marginTop: 16,
+    },
+    paymentNoticeText: {
+      fontSize: 12,
+      color: colors.textSecondary,
+      lineHeight: 19,
+    },
+
+    // ── CTA ────────────────────────────────────────
+    primaryButton: {
+      backgroundColor: colors.primary,
+      borderRadius: 28,
+      paddingVertical: 17,
+      alignItems: 'center',
+      shadowColor: colors.primary,
+      shadowOffset: { width: 0, height: 6 },
+      shadowOpacity: 0.3,
+      shadowRadius: 12,
+      elevation: 6,
+    },
+    primaryButtonText: {
+      color: '#FFFFFF',
+      fontSize: 16,
+      fontWeight: '700',
+      letterSpacing: 0.2,
+    },
+    checkoutUnavailable: {
+      backgroundColor: colors.surface,
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: colors.border,
+      padding: 14,
+    },
+    checkoutUnavailableText: {
+      color: colors.textSecondary,
+      fontSize: 13,
+      fontWeight: '600',
+      lineHeight: 20,
+      textAlign: 'center',
+    },
+  })
+}

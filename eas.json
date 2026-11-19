@@ -1,0 +1,52 @@
+{
+  "cli": {
+    "version": ">= 18.11.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://app.tshelo.com",
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://app.tshelo.com/legal/terms",
+        "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://app.tshelo.com/legal/privacy"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "development-simulator": {
+      "extends": "development",
+      "ios": {
+        "simulator": true
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://app.tshelo.com",
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://app.tshelo.com/legal/terms",
+        "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://app.tshelo.com/legal/privacy"
+      },
+      "android": {
+        "buildType": "apk"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "channel": "production",
+      "environment": "production",
+      "env": {
+        "EXPO_PUBLIC_API_BASE_URL": "https://app.tshelo.com",
+        "EXPO_PUBLIC_TERMS_OF_SERVICE_URL": "https://app.tshelo.com/legal/terms",
+        "EXPO_PUBLIC_PRIVACY_POLICY_URL": "https://app.tshelo.com/legal/privacy"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

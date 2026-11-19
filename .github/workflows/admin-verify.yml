@@ -1,0 +1,51 @@
+name: Admin Verify
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: https://admin-build.invalid
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: sb_publishable_build_only
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: admin/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - name: Start production server
+        run: |
+          npm run start > /tmp/tshelo-admin-server.log 2>&1 &
+          echo $! > /tmp/tshelo-admin-server.pid
+          for attempt in {1..30}; do
+            if curl --silent --output /dev/null http://127.0.0.1:3000/api/v1/funds; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/tshelo-admin-server.log
+          exit 1
+      - name: Verify API response boundaries
+        env:
+          API_BASE_URL: http://127.0.0.1:3000
+        run: npm run verify:api
+      - name: Stop production server
+        if: always()
+        run: |
+          if test -f /tmp/tshelo-admin-server.pid; then
+            kill "$(cat /tmp/tshelo-admin-server.pid)" || true
+          fi

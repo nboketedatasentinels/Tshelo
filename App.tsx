@@ -1,20 +1,281 @@
-import { StatusBar } from 'expo-status-bar';
-import { StyleSheet, Text, View } from 'react-native';
+import { useEffect, useState } from 'react'
+import { NavigationContainer, createNavigationContainerRef } from '@react-navigation/native'
+import { Linking, Platform } from 'react-native'
+import { SafeAreaProvider } from 'react-native-safe-area-context'
+import { useFonts } from 'expo-font'
+import { Inter_400Regular } from '@expo-google-fonts/inter/400Regular'
+import { Inter_400Regular_Italic } from '@expo-google-fonts/inter/400Regular_Italic'
+import { Inter_500Medium } from '@expo-google-fonts/inter/500Medium'
+import { Inter_600SemiBold } from '@expo-google-fonts/inter/600SemiBold'
+import { Inter_700Bold } from '@expo-google-fonts/inter/700Bold'
+import { Inter_800ExtraBold } from '@expo-google-fonts/inter/800ExtraBold'
+import { Inter_900Black } from '@expo-google-fonts/inter/900Black'
+import AsyncStorage from '@react-native-async-storage/async-storage'
+import * as Notifications from 'expo-notifications'
+import * as SplashScreen from 'expo-splash-screen'
+import { AuthProvider, useAuth } from './context/AuthContext'
+import { ThemeProvider } from './context/ThemeContext'
+import { ConnectivityProvider } from './context/ConnectivityContext'
+import { RewardsProvider } from './context/RewardsContext'
+import OfflineBanner from './components/OfflineBanner'
+import ErrorBoundary from './components/ErrorBoundary'
+import AuthNavigator from './navigation/AuthNavigator'
+import MainNavigator from './navigation/MainNavigator'
+import OnboardingScreen from './screens/onboarding/OnboardingScreen'
+import { registerForPushNotificationsAsync, unregisterPushToken } from './lib/pushNotifications'
+import { startSmsWatcher } from './lib/smsWatcher'
+import { api } from './lib/api'
+import { runApiRead } from './lib/apiScreen'
+import type { MainStackParamList } from './navigation/types'
+import { parseInvitationUrl, type Invitation } from '@shared/invitations'
+import { clearPendingInvitation, readPendingInvitation, rememberPendingInvitation } from './navigation/pendingInvitation'
 
-export default function App() {
-  return (
-    <View style={styles.container}>
-      <Text>Open up App.tsx to start working on your app!</Text>
-      <StatusBar style="auto" />
-    </View>
-  );
+const ONBOARDING_KEY = 'tshelo_onboarded_v1'
+const STARTUP_TIMEOUT_MS = 5_000
+
+// Keep the native splash visible while startup state is restored. Every
+// asynchronous startup path below has a fallback so this can never trap a
+// user on the splash screen indefinitely.
+void SplashScreen.preventAutoHideAsync().catch(error => {
+  console.warn('Could not keep the splash screen visible during startup.', error)
+})
+SplashScreen.setOptions({ fade: true, duration: 300 })
+
+export const navigationRef = createNavigationContainerRef<MainStackParamList>()
+
+function openRewards() {
+  if (navigationRef.isReady()) navigationRef.navigate('Rewards')
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+async function navigateFromNotificationData(data: Record<string, any> | undefined) {
+  if (!navigationRef.isReady()) return
+  if (data?.kind === 'reward_earned' || data?.kind === 'trust_level_changed') {
+    navigationRef.navigate('Rewards')
+    return
+  }
+  if ((data?.kind === 'event_announcement' || data?.kind === 'event_reminder') && typeof data.eventId === 'string') {
+    navigationRef.navigate('EventDetail', data.kind === 'event_announcement'
+      ? { eventId: data.eventId, tab: 'announcements' }
+      : { eventId: data.eventId }
+    )
+    return
+  }
+  const detected = data?.detectedSms
+  if (detected && typeof detected.amount === 'number' && typeof detected.receivedAt === 'string') {
+    const notificationId = typeof data?.notificationId === 'string' ? data.notificationId : undefined
+    if (notificationId) {
+      try {
+        const notification = await runApiRead(call => api.notifications.get(notificationId, call))
+        const notificationData = notification.data as Record<string, any> | null
+        const recordedFundId = notification.fund_id ?? notificationData?.recordedFundId
+        if (notification.response_action === 'recorded' && typeof recordedFundId === 'string') {
+          if (navigationRef.isReady()) navigationRef.navigate('FundDetail', { fundId: recordedFundId })
+          return
+        }
+      } catch {
+        // Fall through to the assignment flow when the detail read is unavailable.
+      }
+    }
+    if (navigationRef.isReady()) navigationRef.navigate('AssignContribution', { detected, notificationId })
+    return
+  }
+  const fundId = data?.fundId
+  if (typeof fundId === 'string') {
+    navigationRef.navigate('FundDetail', { fundId })
+  } else {
+    navigationRef.navigate('Notifications')
+  }
+}
+
+function RootNavigator({ initialAuthRoute, navigationReady }: { initialAuthRoute: 'Welcome' | 'CountrySelect' | 'Login'; navigationReady: boolean }) {
+  const { isAuthenticated, profileCompleted, userId, notificationsEnabled } = useAuth()
+  const [pendingInvitation, setPendingInvitation] = useState<Invitation | null>(null)
+
+  useEffect(() => {
+    let active = true
+
+    function receiveInvitation(url: string | null) {
+      if (!url) return false
+      const invitation = parseInvitationUrl(url)
+      if (!invitation) return false
+      if (active) setPendingInvitation(invitation)
+      void rememberPendingInvitation(invitation)
+      return true
+    }
+
+    async function restoreInvitation() {
+      const initialUrl = await Linking.getInitialURL()
+      if (receiveInvitation(initialUrl)) return
+      const stored = await readPendingInvitation()
+      if (active && stored) setPendingInvitation(stored)
+    }
+
+    void restoreInvitation()
+    const subscription = Linking.addEventListener('url', event => { receiveInvitation(event.url) })
+    return () => {
+      active = false
+      subscription.remove()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!navigationReady || !isAuthenticated || !profileCompleted || !pendingInvitation || !navigationRef.isReady()) return
+    const invitation = pendingInvitation
+    setPendingInvitation(null)
+    if (invitation.kind === 'event') navigationRef.navigate('JoinEvent', { code: invitation.code })
+    else navigationRef.navigate('JoinFund', { code: invitation.code })
+    void clearPendingInvitation()
+  }, [isAuthenticated, navigationReady, pendingInvitation, profileCompleted])
+
+  useEffect(() => {
+    if (!isAuthenticated || !profileCompleted || !userId) return
+    if (notificationsEnabled) {
+      void registerForPushNotificationsAsync(userId)
+    } else {
+      void unregisterPushToken()
+    }
+  }, [isAuthenticated, notificationsEnabled, profileCompleted, userId])
+
+  useEffect(() => {
+    if (!isAuthenticated || !profileCompleted || !userId) return
+    const watcher = startSmsWatcher(userId)
+    return () => {
+      watcher.then(subscription => subscription?.remove())
+    }
+  }, [isAuthenticated, profileCompleted, userId])
+
+  useEffect(() => {
+    if (Platform.OS === 'web') return
+
+    Notifications.getLastNotificationResponseAsync().then(response => {
+      if (response) void navigateFromNotificationData(response.notification.request.content.data as any)
+    })
+
+    const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+      void navigateFromNotificationData(response.notification.request.content.data as any)
+    })
+
+    return () => subscription.remove()
+  }, [])
+
+  if (!isAuthenticated || !profileCompleted) {
+    return <AuthNavigator key={pendingInvitation ? 'invitation' : 'default'} initialRouteName={pendingInvitation ? 'Login' : initialAuthRoute} />
+  }
+  return <MainNavigator />
+}
+
+export default function App() {
+  const [fontsLoaded, fontError] = useFonts({
+    'Fraunces-Regular':  require('./assets/fonts/Fraunces_72pt-Regular.ttf'),
+    'Fraunces-SemiBold': require('./assets/fonts/Fraunces_72pt-SemiBold.ttf'),
+    'Fraunces-Bold':     require('./assets/fonts/Fraunces_72pt-Bold.ttf'),
+    'Inter-Regular':      Inter_400Regular,
+    'Inter-Italic':       Inter_400Regular_Italic,
+    'Inter-Medium':       Inter_500Medium,
+    'Inter-SemiBold':     Inter_600SemiBold,
+    'Inter-Bold':         Inter_700Bold,
+    'Inter-ExtraBold':    Inter_800ExtraBold,
+    'Inter-Black':        Inter_900Black,
+  })
+
+  const [hasOnboarded,    setHasOnboarded]    = useState<boolean | null>(null)
+  const [initialAuthRoute, setInitialAuthRoute] = useState<'Welcome' | 'CountrySelect' | 'Login'>('Welcome')
+  const [navigationReady, setNavigationReady] = useState(false)
+  const [fontLoadTimedOut, setFontLoadTimedOut] = useState(false)
+
+  useEffect(() => {
+    if (fontError) {
+      console.error('Could not load app fonts; continuing with system fonts.', fontError)
+      return
+    }
+    if (fontsLoaded) return
+
+    const timeout = setTimeout(() => {
+      console.warn('App fonts did not finish loading; continuing with system fonts.')
+      setFontLoadTimedOut(true)
+    }, STARTUP_TIMEOUT_MS)
+
+    return () => clearTimeout(timeout)
+  }, [fontError, fontsLoaded])
+
+  useEffect(() => {
+    let active = true
+    let settled = false
+
+    function finish(onboarded: boolean) {
+      if (!active || settled) return
+      settled = true
+      setHasOnboarded(onboarded)
+    }
+
+    const timeout = setTimeout(() => {
+      if (settled) return
+      console.warn('Timed out restoring onboarding state; showing onboarding instead.')
+      finish(false)
+    }, STARTUP_TIMEOUT_MS)
+
+    AsyncStorage.getItem(ONBOARDING_KEY)
+      .then(val => finish(val === 'true'))
+      .catch(error => {
+        console.error('Could not restore onboarding state; showing onboarding instead.', error)
+        finish(false)
+      })
+
+    return () => {
+      active = false
+      clearTimeout(timeout)
+    }
+  }, [])
+
+  const fontsReady = fontsLoaded || fontError !== null || fontLoadTimedOut
+  const appReady = fontsReady && hasOnboarded !== null
+
+  useEffect(() => {
+    if (!appReady) return
+    void SplashScreen.hideAsync().catch(error => {
+      console.error('Could not hide the splash screen after startup.', error)
+    })
+  }, [appReady])
+
+  // Splash stays up until startup completes, with a five-second fallback.
+  if (!appReady) return null
+
+  function completeOnboarding(dest?: 'CountrySelect' | 'Login') {
+    if (dest) setInitialAuthRoute(dest)
+    setHasOnboarded(true)
+    void AsyncStorage.setItem(ONBOARDING_KEY, 'true').catch(error => {
+      console.error('Could not persist onboarding state.', error)
+    })
+  }
+
+  if (!hasOnboarded) {
+    return (
+      <ErrorBoundary>
+        <ThemeProvider>
+          <SafeAreaProvider>
+            <OnboardingScreen onDone={completeOnboarding} />
+          </SafeAreaProvider>
+        </ThemeProvider>
+      </ErrorBoundary>
+    )
+  }
+
+  return (
+    <ErrorBoundary>
+      <ThemeProvider>
+        <SafeAreaProvider>
+          <ConnectivityProvider>
+            <AuthProvider>
+              <NavigationContainer ref={navigationRef} onReady={() => setNavigationReady(true)}>
+                <RewardsProvider onOpenRewards={openRewards}>
+                  <RootNavigator initialAuthRoute={initialAuthRoute} navigationReady={navigationReady} />
+                </RewardsProvider>
+              </NavigationContainer>
+              <OfflineBanner />
+            </AuthProvider>
+          </ConnectivityProvider>
+        </SafeAreaProvider>
+      </ThemeProvider>
+    </ErrorBoundary>
+  )
+}

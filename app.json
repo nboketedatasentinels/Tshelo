@@ -1,33 +1,93 @@
 {
   "expo": {
-    "name": "tshelo",
+    "name": "Tshelo",
     "slug": "tshelo",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
-    "splash": {
-      "image": "./assets/splash-icon.png",
-      "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+    "scheme": "tshelo",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/a0f76b53-0427-41d9-b5a1-a59024570558"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.datasentinels.tshelo",
+      "googleServicesFile": "./GoogleService-Info.plist",
+      "buildNumber": "1",
+      "associatedDomains": ["applinks:app.tshelo.com"],
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSCalendarsUsageDescription": "Allow Tshelo to open your calendar so you can review and add event dates.",
+        "NSCalendarsFullAccessUsageDescription": "Allow Tshelo to open your calendar so you can review and add event dates.",
+        "NSRemindersUsageDescription": "Tshelo does not access reminders; this declaration is required by the system calendar editor.",
+        "NSRemindersFullAccessUsageDescription": "Tshelo does not access reminders; this declaration is required by the system calendar editor."
+      }
     },
     "android": {
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
+        "backgroundColor": "#000000"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.tshelo.app",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [
+            {
+              "scheme": "https",
+              "host": "app.tshelo.com",
+              "pathPrefix": "/invite"
+            }
+          ],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-secure-store"
-    ]
+      "expo-secure-store",
+      "expo-font",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#000000"
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#7439E0"
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      [
+        "expo-contacts",
+        {
+          "contactsPermission": "Allow Tshelo to access your contacts so you can add organisers from your phone book."
+        }
+      ],
+      "expo-web-browser"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a0f76b53-0427-41d9-b5a1-a59024570558"
+      }
+    },
+    "owner": "digital-natives"
   }
 }
